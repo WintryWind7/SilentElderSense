@@ -138,6 +138,7 @@ async def list_history():
 
 
 @alerts_bp.route('/api/alerts/trigger', methods=['POST'])
+@token_required
 async def trigger_alert():
     """
     手动触发告警
