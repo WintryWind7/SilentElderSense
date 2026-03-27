@@ -6,13 +6,16 @@
     WebSocket /ws/video/<video_id> - 实时返回处理进度和检测结果
 """
 import os
+import time
 import uuid
 import asyncio
-from datetime import datetime
+import base64
+import struct
 from quart import Blueprint, jsonify, request, websocket
 import cv2
 import numpy as np
 from core import FallDetector
+from .risk_engine import risk_engine, RISK_COLORS_BGR, RISK_REASON_LABELS
 
 detect_bp = Blueprint('detect', __name__)
 
@@ -31,7 +34,7 @@ def get_detector() -> FallDetector:
     """获取全局检测器实例"""
     global _detector
     if _detector is None:
-        _detector = FallDetector()
+        _detector = FallDetector(model_path="core/models/fall_detection_v1.onnx")
     return _detector
 
 
@@ -85,8 +88,7 @@ async def process_video_ws(video_id: str):
         "type": "progress" | "frame" | "complete" | "error",
         "progress": 0-100,        // 进度时
         "frame_id": 1.5,          // 帧结果时
-        "persons": [...],         // 帧结果时
-        "events": [...],          // 帧结果时
+        "persons": [...],         // 帧结果时，每人含 risk_level/risk_reason/box
         "total_frames": 100,      // 完成时
         "results": [...]          // 完成时
     }
@@ -106,6 +108,7 @@ async def process_video_ws(video_id: str):
 
     detector = get_detector()
     session_id = detector.create_session()
+    risk_engine.create_session(session_id, is_live=False)
 
     try:
         cap = cv2.VideoCapture(video_path)
@@ -116,7 +119,7 @@ async def process_video_ws(video_id: str):
 
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fps = cap.get(cv2.CAP_PROP_FPS) or 25
-        frame_interval = 1  # 处理每一帧
+        frame_interval = 1
 
         await websocket.send_json({
             'type': 'info',
@@ -136,66 +139,52 @@ async def process_video_ws(video_id: str):
 
             frame_count += 1
 
-            # 按间隔采样
             if frame_count % frame_interval == 0:
-                # 计算帧时间戳（秒）
                 frame_time = frame_count / fps
-
-                # 缩放帧尺寸以提高处理速度
                 resized = cv2.resize(frame, (640, 480))
 
                 # 检测
-                timestamp = datetime.now().timestamp()
-                result = await detector.process_frame_async(session_id, resized, timestamp)
+                result = await detector.process_frame_async(session_id, resized)
+                now = time.time()
 
-                # 在帧上绘制检测框
-                for person in result.frame_result.persons:
-                    x1, y1, x2, y2 = [int(x) for x in person.box]
-                    # fallen 红色, falling 黄色, 其他绿色
-                    color = (0, 0, 255) if person.class_name == 'fallen' else \
-                            (0, 255, 255) if person.class_name == 'falling' else (0, 255, 0)
+                # 风险判定
+                risk_results = risk_engine.process(
+                    session_id, result.frame_result.persons, now
+                )
 
+                # 在帧上绘制风险框
+                for risk in risk_results:
+                    x1, y1, x2, y2 = [int(x) for x in risk.box]
+                    color = RISK_COLORS_BGR.get(risk.risk_level, (0, 255, 0))
                     cv2.rectangle(resized, (x1, y1), (x2, y2), color, 2)
+                    cv2.putText(resized, risk.risk_level, (x1, y1 - 8),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-                    label = f"{person.class_name} {person.confidence * 100:.0f}%"
-                    cv2.putText(resized, label, (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-
-                # 编码帧图像为 hex
+                # 编码帧图像
                 _, buffer = cv2.imencode('.jpg', resized, [cv2.IMWRITE_JPEG_QUALITY, 80])
                 frame_hex = buffer.tobytes().hex()
 
-                # 构建响应（不再需要 persons 的 box 信息，前端只展示）
                 frame_result = {
                     'type': 'frame',
                     'frame_id': round(frame_time, 2),
                     'frame_number': frame_count,
                     'image': frame_hex,
-                    'persons': [],
-                    'events': []
+                    'persons': [
+                        {
+                            'person_id': r.person_id,
+                            'box': [round(x, 1) for x in r.box],
+                            'risk_level': r.risk_level,
+                            'risk_reason': r.risk_reason,
+                        }
+                        for r in risk_results
+                    ],
                 }
-
-                for person in result.frame_result.persons:
-                    frame_result['persons'].append({
-                        'person_id': person.person_id,
-                        'class_name': person.class_name,
-                        'confidence': round(person.confidence, 3)
-                    })
-
-                for event in result.events:
-                    frame_result['events'].append({
-                        'person_id': event.person_id,
-                        'event_type': event.event_type.name,
-                        'risk_level': event.risk_level.name,
-                        'duration': round(event.duration, 2)
-                    })
 
                 all_results.append(frame_result)
                 processed_count += 1
 
-                # 发送帧结果
                 await websocket.send_json(frame_result)
 
-                # 发送进度
                 progress = int((frame_count / total_frames) * 100)
                 await websocket.send_json({
                     'type': 'progress',
@@ -205,8 +194,8 @@ async def process_video_ws(video_id: str):
 
         cap.release()
         detector.close_session(session_id)
+        risk_engine.close_session(session_id)
 
-        # 发送完成消息
         await websocket.send_json({
             'type': 'complete',
             'total_frames': frame_count,
@@ -217,19 +206,17 @@ async def process_video_ws(video_id: str):
     except Exception as e:
         await websocket.send_json({'type': 'error', 'message': str(e)})
     finally:
-        await websocket.close()
+        await websocket.close(1000)  # 1000 = 正常关闭
 
 
-# ── 保留原有的实时帧检测接口（供摄像头使用） ──────────────────────────
-import struct
-import base64
-
+# ── 实时帧检测接口（供摄像头使用） ──────────────────────────
 
 @detect_bp.route('/api/session/create', methods=['POST'])
 async def create_session():
     """创建实时检测会话"""
     detector = get_detector()
     video_id = detector.create_session()
+    risk_engine.create_session(video_id, is_live=True)
     return jsonify({'video_id': video_id})
 
 
@@ -238,6 +225,7 @@ async def close_session(video_id: str):
     """关闭实时检测会话"""
     detector = get_detector()
     success = detector.close_session(video_id)
+    risk_engine.close_session(video_id)
     return jsonify({'success': success})
 
 
@@ -267,9 +255,10 @@ async def detect_ws(video_id: str):
                 await websocket.send_json({'error': 'Invalid frame data'})
                 continue
 
-            timestamp = datetime.now().timestamp()
-            result = await detector.process_frame_async(video_id, frame, timestamp)
-            response = build_response(result)
+            result = await detector.process_frame_async(video_id, frame)
+            now = time.time()
+            risk_results = risk_engine.process(video_id, result.frame_result.persons, now)
+            response = build_response(result.frame_result.detected, risk_results)
             await websocket.send_json(response)
 
         except Exception as e:
@@ -287,28 +276,17 @@ def decode_jpeg(data: bytes) -> np.ndarray:
         return None
 
 
-def build_response(result) -> dict:
-    """构建 JSON 响应"""
-    response = {
-        'detected': result.frame_result.detected,
-        'persons': [],
-        'events': []
+def build_response(detected: bool, risk_results) -> dict:
+    """构建给前端的 JSON 响应"""
+    return {
+        'detected': detected,
+        'persons': [
+            {
+                'person_id': r.person_id,
+                'box': [round(x, 1) for x in r.box],
+                'risk_level': r.risk_level,
+                'risk_reason': r.risk_reason,
+            }
+            for r in risk_results
+        ],
     }
-
-    for person in result.frame_result.persons:
-        response['persons'].append({
-            'person_id': person.person_id,
-            'class_name': person.class_name,
-            'confidence': round(person.confidence, 3),
-            'box': [round(x, 1) for x in person.box]
-        })
-
-    for event in result.events:
-        response['events'].append({
-            'person_id': event.person_id,
-            'event_type': event.event_type.name,
-            'risk_level': event.risk_level.name,
-            'duration': round(event.duration, 2)
-        })
-
-    return response
