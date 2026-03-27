@@ -16,6 +16,10 @@ import cv2
 import numpy as np
 from core import FallDetector
 from .risk_engine import risk_engine, RISK_COLORS_BGR, RISK_REASON_LABELS
+from auth.utils import token_required
+from auth.models import get_db
+from events.models import Event
+from datetime import datetime
 
 detect_bp = Blueprint('detect', __name__)
 
@@ -148,7 +152,7 @@ async def process_video_ws(video_id: str):
                 now = time.time()
 
                 # 风险判定
-                risk_results = risk_engine.process(
+                risk_results, _ = risk_engine.process(
                     session_id, result.frame_result.persons, now
                 )
 
@@ -213,10 +217,20 @@ async def process_video_ws(video_id: str):
 
 @detect_bp.route('/api/session/create', methods=['POST'])
 async def create_session():
-    """创建实时检测会话"""
+    """创建实时检测会话（可选认证，有 token 则持久化）"""
     detector = get_detector()
     video_id = detector.create_session()
-    risk_engine.create_session(video_id, is_live=True)
+
+    # 尝试获取 user_id（可选）
+    user_id = None
+    try:
+        # 从 request 获取 token 信息（如果有）
+        if hasattr(request, 'current_user') and request.current_user:
+            user_id = request.current_user.get('user_id')
+    except Exception:
+        pass
+
+    risk_engine.create_session(video_id, is_live=True, user_id=user_id)
     return jsonify({'video_id': video_id})
 
 
@@ -224,23 +238,85 @@ async def create_session():
 async def close_session(video_id: str):
     """关闭实时检测会话"""
     detector = get_detector()
-    success = detector.close_session(video_id)
-    risk_engine.close_session(video_id)
-    return jsonify({'success': success})
+    now = time.time()
+    user_id = risk_engine.get_user_id(video_id)
+    ended_changes = risk_engine.close_session(video_id, now=now)
+    detector.close_session(video_id)
+    if user_id and ended_changes:
+        db = next(get_db())
+        for ch in ended_changes:
+            _persist_event_change(db, ch, video_id, user_id, now)
+        db.commit()
+    return jsonify({'success': True})
 
 
 @detect_bp.websocket('/ws/detect/<video_id>')
 async def detect_ws(video_id: str):
-    """WebSocket 实时帧检测（摄像头）"""
+    """WebSocket 实时帧检测（摄像头）- 跳帧策略，跳过队列中的旧帧"""
     detector = get_detector()
 
     if detector.session_manager.get_session(video_id) is None:
-        await websocket.send_json({'error': 'Invalid video_id'})
+        await websocket.send_json({'type': 'error', 'message': 'Invalid video_id'})
         await websocket.close()
         return
 
+    processed_count = 0
+    skipped_count = 0
+
+    async def process_frame(frame, frame_ts):
+        """处理单个帧"""
+        nonlocal processed_count
+
+        resized = cv2.resize(frame, (640, 480))
+
+        result = await detector.process_frame_async(video_id, resized)
+        now = time.time()
+        risk_results, event_changes = risk_engine.process(video_id, result.frame_result.persons, now)
+
+        # 持久化事件变更
+        if event_changes:
+            user_id = risk_engine.get_user_id(video_id)
+            if user_id:
+                db = next(get_db())
+                for ch in event_changes:
+                    _persist_event_change(db, ch, video_id, user_id, now)
+                db.commit()
+
+        # 绘制检测框
+        for risk in risk_results:
+            x1, y1, x2, y2 = [int(x) for x in risk.box]
+            color = RISK_COLORS_BGR.get(risk.risk_level, (0, 255, 0))
+            cv2.rectangle(resized, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(resized, risk.risk_level, (x1, y1 - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+        # 编码帧图像
+        _, buffer = cv2.imencode('.jpg', resized, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        frame_hex = buffer.tobytes().hex()
+
+        processed_count += 1
+        latency_ms = int((now - frame_ts) * 1000)
+
+        return {
+            'type': 'frame',
+            'frame_id': processed_count,
+            'image': frame_hex,
+            'persons': [
+                {
+                    'person_id': r.person_id,
+                    'box': [round(x, 1) for x in r.box],
+                    'risk_level': r.risk_level,
+                    'risk_reason': r.risk_reason,
+                }
+                for r in risk_results
+            ],
+            'latency_ms': latency_ms,
+            'skipped': skipped_count,
+        }
+
     while True:
         try:
+            # 接收帧
             data = await websocket.receive()
 
             if isinstance(data, bytes):
@@ -252,18 +328,75 @@ async def detect_ws(video_id: str):
                 continue
 
             if frame is None:
-                await websocket.send_json({'error': 'Invalid frame data'})
                 continue
 
-            result = await detector.process_frame_async(video_id, frame)
-            now = time.time()
-            risk_results = risk_engine.process(video_id, result.frame_result.persons, now)
-            response = build_response(result.frame_result.detected, risk_results)
-            await websocket.send_json(response)
+            # 尝试清空队列中的旧帧，只保留最新帧
+            while True:
+                try:
+                    # 非阻塞读取：如果有更多消息，读取并丢弃旧帧
+                    next_data = await asyncio.wait_for(websocket.receive(), timeout=0.001)
+                    if isinstance(next_data, bytes):
+                        next_frame = decode_jpeg(next_data)
+                    elif isinstance(next_data, str):
+                        next_frame = decode_jpeg(base64.b64decode(next_data))
+                    else:
+                        continue
+
+                    if next_frame is not None:
+                        frame = next_frame  # 用新帧覆盖旧帧
+                        skipped_count += 1
+                except asyncio.TimeoutError:
+                    # 队列已空，没有更多消息
+                    break
+                except Exception:
+                    break
+
+            # 处理最新帧
+            frame_ts = time.time()
+            result = await process_frame(frame, frame_ts)
+            await websocket.send_json(result)
 
         except Exception as e:
             print(f"WebSocket error: {e}")
             break
+
+
+def _persist_event_change(db, ch, video_id: str, user_id: int, now: float):
+    """将事件变更写入数据库"""
+    if ch.change_type == 'started':
+        event = Event(
+            user_id=user_id,
+            video_id=video_id,
+            person_id=ch.person_id,
+            event_type=ch.event_type,
+            risk_level=ch.risk_level,
+            start_time=datetime.fromtimestamp(ch.start_ts),
+            end_time=None,
+            duration=0.0,
+            frame_count=ch.frame_count,
+            status='pending',
+        )
+        db.add(event)
+    elif ch.change_type == 'risk_upgraded':
+        db.query(Event).filter(
+            Event.video_id == video_id,
+            Event.person_id == ch.person_id,
+            Event.event_type == ch.event_type,
+            Event.end_time.is_(None),
+        ).update({'risk_level': ch.risk_level, 'frame_count': ch.frame_count})
+    elif ch.change_type == 'ended':
+        end_dt = datetime.fromtimestamp(ch.end_ts)
+        duration = ch.end_ts - ch.start_ts
+        db.query(Event).filter(
+            Event.video_id == video_id,
+            Event.person_id == ch.person_id,
+            Event.event_type == ch.event_type,
+            Event.end_time.is_(None),
+        ).update({
+            'end_time': end_dt,
+            'duration': duration,
+            'frame_count': ch.frame_count,
+        })
 
 
 def decode_jpeg(data: bytes) -> np.ndarray:

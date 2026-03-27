@@ -89,6 +89,7 @@ STILLNESS_MOVEMENT_THRESHOLD = 5.0   # movement < 此值认为静止（像素）
 STILLNESS_ESCALATE_SECS = 60.0       # 静止持续多少秒后升为 MEDIUM
 NIGHT_START_HOUR = 22                # 夜间开始（含）
 NIGHT_END_HOUR = 7                   # 夜间结束（不含，即 07:00 前）
+LOST_GRACE_SECS = 1.0                # 人员消失后宽限期（秒），超时则结束事件入库
 
 
 @dataclass
@@ -99,6 +100,18 @@ class PersonRisk:
     risk_level: str              # NORMAL / LOW / MEDIUM / HIGH
     risk_reason: Optional[str]   # fallen / stillness / night_abnormal / None
     event_type: Optional[str]    # FALLEN / STILLNESS / NIGHT_ABNORMAL / None
+
+
+@dataclass
+class EventChange:
+    """事件生命周期变更信号，供路由层持久化使用"""
+    change_type: str          # 'started' | 'risk_upgraded' | 'ended'
+    person_id: int
+    event_type: str           # 'FALLEN' | 'STILLNESS'
+    risk_level: str
+    start_ts: float
+    end_ts: Optional[float] = None
+    frame_count: int = 0
 
 
 @dataclass
@@ -119,11 +132,19 @@ class PersonRiskState:
     movement_above_threshold_count: int = 0                 # 窗口内 movement >= 阈值的条目数
     stillness_event_start_ts: Optional[float] = None       # None 表示无活跃 STILLNESS 事件
 
+    # 持久化事件追踪（对应数据库中的一条记录）
+    db_event_type: Optional[str] = None        # 当前正在写库的事件类型
+    db_event_risk_level: Optional[str] = None  # 当前写库事件的风险等级
+    db_event_start_ts: Optional[float] = None  # 当前写库事件的开始时间戳
+    db_event_frame_count: int = 0              # 当前写库事件累积帧数
+
 
 class _SessionState:
-    def __init__(self, is_live: bool):
+    def __init__(self, is_live: bool, user_id: Optional[int] = None):
         self.is_live = is_live
+        self.user_id = user_id
         self.persons: Dict[int, PersonRiskState] = {}
+        self.pending_removal: Dict[int, float] = {}  # person_id -> 消失时间戳
 
     def get_person(self, person_id: int) -> PersonRiskState:
         if person_id not in self.persons:
@@ -145,15 +166,38 @@ class RiskEngine:
     def __init__(self):
         self._sessions: Dict[str, _SessionState] = {}
 
-    def create_session(self, video_id: str, is_live: bool = False):
-        self._sessions[video_id] = _SessionState(is_live=is_live)
+    def get_user_id(self, video_id: str) -> Optional[int]:
+        session = self._sessions.get(video_id)
+        return session.user_id if session else None
 
-    def close_session(self, video_id: str):
-        self._sessions.pop(video_id, None)
+    def create_session(self, video_id: str, is_live: bool = False, user_id: Optional[int] = None):
+        self._sessions[video_id] = _SessionState(is_live=is_live, user_id=user_id)
 
-    def process(self, video_id: str, persons: List[PersonResult], now: float) -> List[PersonRisk]:
+    def close_session(self, video_id: str, now: Optional[float] = None) -> List[EventChange]:
+        """关闭会话，返回所有未结束事件的 ended 变更"""
+        session = self._sessions.pop(video_id, None)
+        if session is None:
+            return []
+        if now is None:
+            now = time.time()
+        changes = []
+        all_persons = {**session.persons}
+        for pid, state in all_persons.items():
+            if state.db_event_type:
+                changes.append(EventChange(
+                    change_type='ended',
+                    person_id=pid,
+                    event_type=state.db_event_type,
+                    risk_level=state.db_event_risk_level,
+                    start_ts=state.db_event_start_ts,
+                    end_ts=now,
+                    frame_count=state.db_event_frame_count,
+                ))
+        return changes
+
+    def process(self, video_id: str, persons: List[PersonResult], now: float) -> Tuple[List[PersonRisk], List[EventChange]]:
         """
-        处理一帧的检测结果，返回每人的风险评估。
+        处理一帧的检测结果，返回每人的风险评估和本帧产生的事件变更。
 
         Args:
             video_id: 会话 ID
@@ -161,40 +205,70 @@ class RiskEngine:
             now:      当前时间戳（time.time()）
 
         Returns:
-            每人的 PersonRisk 列表
+            (每人的 PersonRisk 列表, 本帧事件变更列表)
         """
         session = self._sessions.get(video_id)
         if session is None:
             logger.warning(f"[{video_id}] Session not found")
-            return []
+            return [], []
+
+        event_changes: List[EventChange] = []
+
+        # 先处理宽限期超时的人员：强制结束其事件
+        expired_pids = [pid for pid, ts in session.pending_removal.items() if now - ts >= LOST_GRACE_SECS]
+        for pid in expired_pids:
+            state = session.persons.get(pid)
+            if state and state.db_event_type:
+                event_changes.append(EventChange(
+                    change_type='ended',
+                    person_id=pid,
+                    event_type=state.db_event_type,
+                    risk_level=state.db_event_risk_level,
+                    start_ts=state.db_event_start_ts,
+                    end_ts=now,
+                    frame_count=state.db_event_frame_count,
+                ))
+            if pid in session.persons:
+                del session.persons[pid]
+            del session.pending_removal[pid]
 
         # 记录追踪状态
-        prev_ids = set(session.persons.keys())
+        prev_ids = set(session.persons.keys()) | set(session.pending_removal.keys())
         results = []
         current_person_ids = set()
 
-        # 记录检测到的人员
         person_info = [(p.person_id, p.class_name, f"{p.movement:.1f}" if p.movement else "None") for p in persons]
         logger.debug(f"[{video_id}] Detected: {len(persons)} persons | {person_info}")
 
         for person in persons:
             current_person_ids.add(person.person_id)
+
+            # 若在宽限期内重新出现，从 pending_removal 恢复
+            if person.person_id in session.pending_removal:
+                del session.pending_removal[person.person_id]
+
             state = session.get_person(person.person_id)
             fallen_risk, fallen_reason, fallen_event = self._eval_fallen(state, person, now)
             stillness_risk, stillness_reason, stillness_event = self._eval_stillness(
                 state, person, now, session.is_live
             )
 
-            # 取两者中较高风险
-            risk_order = RiskLevel.order()
-            if risk_order[fallen_risk] >= risk_order[stillness_risk]:
+            # FALLEN 进行中时抑制 STILLNESS（重置 stillness 状态，防止虚假积累）
+            if fallen_event == 'FALLEN':
+                state.stillness_event_start_ts = None
                 risk_level = fallen_risk
                 risk_reason = fallen_reason
                 event_type = fallen_event
             else:
-                risk_level = stillness_risk
-                risk_reason = stillness_reason
-                event_type = stillness_event
+                risk_order = RiskLevel.order()
+                if risk_order[fallen_risk] >= risk_order[stillness_risk]:
+                    risk_level = fallen_risk
+                    risk_reason = fallen_reason
+                    event_type = fallen_event
+                else:
+                    risk_level = stillness_risk
+                    risk_reason = stillness_reason
+                    event_type = stillness_event
 
             # 记录风险结果
             if risk_level != 'NORMAL':
@@ -208,19 +282,74 @@ class RiskEngine:
                 event_type=event_type,
             ))
 
-        # 清理丢失的人员状态（防止内存泄漏）
-        lost_ids = set(session.persons.keys()) - current_person_ids
+            # ── 事件持久化信号 ──
+            if event_type is None:
+                # 当前无风险事件
+                if state.db_event_type:
+                    event_changes.append(EventChange(
+                        change_type='ended',
+                        person_id=person.person_id,
+                        event_type=state.db_event_type,
+                        risk_level=state.db_event_risk_level,
+                        start_ts=state.db_event_start_ts,
+                        end_ts=now,
+                        frame_count=state.db_event_frame_count,
+                    ))
+                    state.db_event_type = None
+                    state.db_event_risk_level = None
+                    state.db_event_start_ts = None
+                    state.db_event_frame_count = 0
+            elif state.db_event_type != event_type:
+                # 事件类型切换：先结束旧事件，再开始新事件
+                if state.db_event_type:
+                    event_changes.append(EventChange(
+                        change_type='ended',
+                        person_id=person.person_id,
+                        event_type=state.db_event_type,
+                        risk_level=state.db_event_risk_level,
+                        start_ts=state.db_event_start_ts,
+                        end_ts=now,
+                        frame_count=state.db_event_frame_count,
+                    ))
+                state.db_event_type = event_type
+                state.db_event_risk_level = risk_level
+                state.db_event_start_ts = now
+                state.db_event_frame_count = 1
+                event_changes.append(EventChange(
+                    change_type='started',
+                    person_id=person.person_id,
+                    event_type=event_type,
+                    risk_level=risk_level,
+                    start_ts=now,
+                    frame_count=1,
+                ))
+            else:
+                # 同一事件持续
+                state.db_event_frame_count += 1
+                if risk_level != state.db_event_risk_level:
+                    state.db_event_risk_level = risk_level
+                    event_changes.append(EventChange(
+                        change_type='risk_upgraded',
+                        person_id=person.person_id,
+                        event_type=event_type,
+                        risk_level=risk_level,
+                        start_ts=state.db_event_start_ts,
+                        frame_count=state.db_event_frame_count,
+                    ))
+
+        # 新消失的人员进入宽限期
+        lost_ids = (set(session.persons.keys()) - current_person_ids) - set(session.pending_removal.keys())
         new_ids = current_person_ids - prev_ids
 
         if lost_ids:
-            logger.debug(f"[{video_id}] Lost IDs: {lost_ids}")
+            logger.debug(f"[{video_id}] Lost IDs (grace): {lost_ids}")
         if new_ids:
             logger.debug(f"[{video_id}] New IDs: {new_ids}")
 
         for pid in lost_ids:
-            del session.persons[pid]
+            session.pending_removal[pid] = now
 
-        return results
+        return results, event_changes
 
     def _eval_fallen(
         self, state: PersonRiskState, person: PersonResult, now: float
@@ -229,9 +358,12 @@ class RiskEngine:
         if person.class_id == 1:
             state.fallen_count += 1
         else:
-            # 离开 fallen 状态，重置
+            # 离开 fallen 状态，重置；同时清空 stillness 窗口防止虚假触发
             state.fallen_count = 0
             state.fallen_event_start_ts = None
+            state.stillness_event_start_ts = None
+            state.movement_window.clear()
+            state.movement_above_threshold_count = 0
             return RiskLevel.NORMAL.value, None, None
 
         # 连续帧达到阈值，激活事件
