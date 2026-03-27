@@ -91,8 +91,8 @@
                   <span class="value">{{ detectionResult.persons?.length || 0 }}</span>
                 </div>
                 <div class="info-item">
-                  <span class="label">事件数：</span>
-                  <span class="value">{{ detectionResult.events?.length || 0 }}</span>
+                  <span class="label">风险人数：</span>
+                  <span class="value">{{ riskyPersonCount }}</span>
                 </div>
               </div>
             </div>
@@ -112,39 +112,39 @@
             </div>
             <template v-else>
               <div class="section">
-                <h4>检测到的人员</h4>
+                <h4>风险状态</h4>
                 <div v-if="detectionResult.persons?.length" class="person-list">
                   <div v-for="person in detectionResult.persons" :key="person.person_id" class="person-item">
-                    <el-tag :type="getPersonTagType(person.class_name)" size="small">
-                      {{ getPersonLabel(person.class_name) }}
+                    <el-tag :type="getRiskTagType(person.risk_level)" size="small">
+                      {{ getRiskLabel(person.risk_level, person.risk_reason) }}
                     </el-tag>
-                    <span class="confidence">置信度: {{ (person.confidence * 100).toFixed(1) }}%</span>
+                    <span class="person-id">ID: {{ person.person_id }}</span>
                   </div>
                 </div>
                 <el-empty v-else description="暂无检测结果" :image-size="60" />
               </div>
 
               <div class="section">
-                <h4>检测事件</h4>
-                <div v-if="detectionResult.events?.length" class="event-list">
-                  <div v-for="(event, index) in detectionResult.events" :key="index" class="event-item">
-                    <el-tag :type="getEventTagType(event.risk_level)" size="small">
-                      {{ getEventLabel(event.event_type) }}
+                <h4>本帧风险汇总</h4>
+                <div v-if="detectionResult.persons?.some(p => p.risk_level !== 'NORMAL')" class="event-list">
+                  <div v-for="person in detectionResult.persons.filter(p => p.risk_level !== 'NORMAL')" :key="person.person_id" class="event-item">
+                    <el-tag :type="getRiskTagType(person.risk_level)" size="small">
+                      {{ getRiskLabel(person.risk_level, person.risk_reason) }}
                     </el-tag>
-                    <span class="duration">持续: {{ event.duration?.toFixed(1) }}秒</span>
+                    <span class="duration">ID: {{ person.person_id }}</span>
                   </div>
                 </div>
-                <el-empty v-else description="暂无事件" :image-size="60" />
+                <el-empty v-else description="当前无风险" :image-size="60" />
               </div>
 
               <div class="section" v-if="allEvents.length > 0">
-                <h4>历史事件 ({{ allEvents.length }})</h4>
+                <h4>历史风险记录 ({{ allEvents.length }})</h4>
                 <div class="event-list scrollable">
                   <div v-for="(event, index) in allEvents.slice(-10).reverse()" :key="index" class="event-item small">
-                    <el-tag :type="getEventTagType(event.risk_level)" size="small">
-                      {{ getEventLabel(event.event_type) }}
+                    <el-tag :type="getRiskTagType(event.risk_level)" size="small">
+                      {{ getRiskLabel(event.risk_level, event.risk_reason) }}
                     </el-tag>
-                    <span class="time">{{ event.duration?.toFixed(1) }}s</span>
+                    <span class="time">ID: {{ event.person_id }}</span>
                   </div>
                 </div>
               </div>
@@ -157,10 +157,11 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { VideoPlay, VideoPause, VideoCamera, RefreshRight } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { createSession, closeSession, getCameraDevices, stopStream } from '@/api/monitor'
+import { getRiskTagType, getRiskLabel } from '@/utils/risk'
 
 // 摄像头
 const cameraDevices = ref([])
@@ -177,10 +178,17 @@ const isConnected = ref(false)
 const totalEvents = ref(0)
 const allEvents = ref([])
 
+// 内存保护：限制历史记录数量
+const MAX_HISTORY_EVENTS = 100
+
 const detectionResult = ref({
   detected: false,
   persons: [],
-  events: []
+})
+
+// 计算属性：避免模板中重复过滤
+const riskyPersonCount = computed(() => {
+  return (detectionResult.value.persons || []).filter(p => p.risk_level !== 'NORMAL').length
 })
 
 let ws = null
@@ -189,27 +197,6 @@ let videoCtx = null
 let cameraStartTime = null
 let fpsCounter = 0
 let fpsInterval = null
-
-// 标签映射
-const getPersonTagType = (className) => {
-  const map = { 'normal': 'success', 'fall': 'danger', 'stillness': 'warning', 'falling': 'warning', 'fallen': 'danger' }
-  return map[className] || 'info'
-}
-
-const getPersonLabel = (className) => {
-  const map = { 'normal': '正常', 'fall': '跌倒', 'stillness': '静止', 'falling': '跌倒中', 'fallen': '已跌倒' }
-  return map[className] || className
-}
-
-const getEventTagType = (riskLevel) => {
-  const map = { 'HIGH': 'danger', 'MEDIUM': 'warning', 'LOW': 'info' }
-  return map[riskLevel] || 'info'
-}
-
-const getEventLabel = (eventType) => {
-  const map = { 'FALL': '跌倒检测', 'STILLNESS': '长时间静止', 'NIGHT_ACTIVITY': '夜间异常', 'STATIC': '长时间静止' }
-  return map[eventType] || eventType
-}
 
 const formatDuration = (seconds) => {
   const mins = Math.floor(seconds / 60)
@@ -298,9 +285,14 @@ const startCameraDetection = async () => {
           ElMessage.error(data.error)
         } else {
           detectionResult.value = data
-          if (data.events?.length) {
-            totalEvents.value += data.events.length
-            allEvents.value.push(...data.events)
+          const risky = (data.persons || []).filter(p => p.risk_level !== 'NORMAL')
+          if (risky.length) {
+            totalEvents.value += risky.length
+            allEvents.value.push(...risky)
+            // 内存保护：限制历史记录数量
+            if (allEvents.value.length > MAX_HISTORY_EVENTS) {
+              allEvents.value = allEvents.value.slice(-MAX_HISTORY_EVENTS)
+            }
           }
           renderFrame(data)
         }
@@ -414,7 +406,7 @@ const stopSession = async () => {
 
   videoId.value = ''
   isConnected.value = false
-  detectionResult.value = { detected: false, persons: [], events: [] }
+  detectionResult.value = { detected: false, persons: [] }
 }
 
 // 渲染检测框
@@ -434,8 +426,8 @@ const renderFrame = (data) => {
     const scaleX = width / 640
     const scaleY = height / 480
 
-    const color = person.class_name === 'fall' || person.class_name === 'fallen' ? '#f56c6c' :
-                  person.class_name === 'stillness' || person.class_name === 'falling' ? '#e6a23c' : '#67c23a'
+    const riskColorMap = { 'HIGH': '#f56c6c', 'MEDIUM': '#e6a23c', 'LOW': '#409eff', 'NORMAL': '#67c23a' }
+    const color = riskColorMap[person.risk_level] || '#67c23a'
 
     ctx.strokeStyle = color
     ctx.lineWidth = 2
@@ -443,7 +435,7 @@ const renderFrame = (data) => {
 
     ctx.fillStyle = color
     ctx.font = '14px Arial'
-    ctx.fillText(`${getPersonLabel(person.class_name)} ${(person.confidence * 100).toFixed(0)}%`,
+    ctx.fillText(getRiskLabel(person.risk_level, person.risk_reason),
                  x1 * scaleX, y1 * scaleY - 5)
   })
 }
