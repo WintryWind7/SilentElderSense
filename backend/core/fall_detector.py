@@ -138,43 +138,68 @@ class FallDetector:
         """
         后处理模型输出
 
+        YOLO11 ONNX 输出格式：[1, 6, 2100]
+        每个锚点 6 维：[cx, cy, w, h, class0_score, class1_score]
+        其中 class0=normal, class1=fallen，均为 sigmoid 后的概率值。
+
         Returns:
-            [(box, class_id, score), ...]
+            [(box, class_id, score), ...]  经过 NMS 后的结果
         """
         pred = outputs[0]  # (1, 6, 2100)
 
-        # 转置 (1, 6, 2100) -> (1, 2100, 6)
+        # 转置 (1, 6, 2100) -> (2100, 6)
         if pred.shape[1] == 6:
             pred = pred.transpose(0, 2, 1)
-
         pred = pred[0]  # (2100, 6)
 
+        # 取各锚点最高类别分数及对应类别
+        class_scores = pred[:, 4:]          # (2100, 2)
+        class_ids = np.argmax(class_scores, axis=1)    # (2100,)
+        scores = class_scores[np.arange(len(pred)), class_ids]  # (2100,)
+
         # 过滤低置信度
-        scores = pred[:, 4]
         mask = scores > self.conf_threshold
         pred = pred[mask]
+        scores = scores[mask]
+        class_ids = class_ids[mask]
 
         if len(pred) == 0:
             return []
 
-        # 按置信度排序，取前 MAX_PERSONS 个
-        sorted_idx = np.argsort(pred[:, 4])[::-1][:self.MAX_PERSONS]
-
         scale_h = self.orig_shape[0] / self.img_size
         scale_w = self.orig_shape[1] / self.img_size
 
+        # 将 cx,cy,w,h 转为 x1,y1,x2,y2（原图坐标）
+        cx, cy, w, h = pred[:, 0], pred[:, 1], pred[:, 2], pred[:, 3]
+        x1 = (cx - w / 2) * scale_w
+        y1 = (cy - h / 2) * scale_h
+        x2 = (cx + w / 2) * scale_w
+        y2 = (cy + h / 2) * scale_h
+        boxes = np.stack([x1, y1, x2, y2], axis=1)  # (N, 4)
+
+        # NMS：用 OpenCV，输入格式为 [x, y, w, h]
+        boxes_xywh = np.stack([x1, y1, x2 - x1, y2 - y1], axis=1)
+        indices = cv2.dnn.NMSBoxes(
+            boxes_xywh.tolist(),
+            scores.tolist(),
+            score_threshold=self.conf_threshold,
+            nms_threshold=0.45,
+        )
+
+        if len(indices) == 0:
+            return []
+
+        # cv2.dnn.NMSBoxes 返回值在不同版本中可能为 (N,1) 或 (N,)
+        indices = np.array(indices).flatten()
+
+        # 按置信度降序，最多取 MAX_PERSONS 个
+        indices = sorted(indices, key=lambda i: scores[i], reverse=True)[:self.MAX_PERSONS]
+
         results = []
-        for idx in sorted_idx:
-            det = pred[idx]
-            cx, cy, w, h, score, class_id = det
-
-            x1 = (cx - w / 2) * scale_w
-            y1 = (cy - h / 2) * scale_h
-            x2 = (cx + w / 2) * scale_w
-            y2 = (cy + h / 2) * scale_h
-
-            box = [float(x1), float(y1), float(x2), float(y2)]
-            results.append((box, int(class_id), float(score)))
+        for idx in indices:
+            box = [float(boxes[idx, 0]), float(boxes[idx, 1]),
+                   float(boxes[idx, 2]), float(boxes[idx, 3])]
+            results.append((box, int(class_ids[idx]), float(scores[idx])))
 
         return results
 

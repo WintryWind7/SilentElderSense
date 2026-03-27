@@ -209,3 +209,40 @@ response = {
 2. **会话必须关闭**：视频处理结束后调用 `close_session`
 3. **每路视频独立会话**：多用户同时使用时，各自使用自己的 `video_id`
 4. **movement 首帧为 None**：后端需处理此情况
+
+---
+
+## ONNX 推理说明
+
+### 模型输出格式
+
+YOLO11 导出的 ONNX **不含 NMS**，输出原始锚点预测：
+
+```
+输出形状：[1, 6, 2100]
+每个锚点 6 维：[cx, cy, w, h, class0_score, class1_score]
+```
+
+- `class0_score`：normal 的概率（sigmoid 后，0–1）
+- `class1_score`：fallen 的概率（sigmoid 后，0–1）
+
+**注意**：这两列是各自独立的概率，不是 softmax，不能直接取某一列作为置信度。
+
+### 类别判断方式
+
+正确做法是取两列中的最大值作为置信度，并以 argmax 确定类别：
+
+```python
+class_scores = pred[:, 4:]                              # (N, 2)
+class_ids = np.argmax(class_scores, axis=1)             # 0=normal, 1=fallen
+scores = class_scores[np.arange(N), class_ids]          # 对应类别的置信度
+```
+
+❌ 错误做法（永远输出 normal）：
+```python
+cx, cy, w, h, score, class_id = det  # class_id = float(0.6x) → int → 0
+```
+
+### NMS
+
+ONNX 导出不含 NMS，`core` 内部使用 `cv2.dnn.NMSBoxes` 完成后处理，阈值为 `nms_threshold=0.45`，无需调用方额外处理。
