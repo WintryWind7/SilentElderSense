@@ -243,7 +243,7 @@ async def close_session(video_id: str):
         db = SessionLocal()
         try:
             for ch in ended_changes:
-                _persist_event_change(db, ch, video_id, user_id, now)
+                _persist_event_change(db, ch, video_id, user_id)
             db.commit()
         except Exception as e:
             print(f"[ERROR] 事件持久化失败: {e}")
@@ -340,7 +340,7 @@ async def detect_ws(video_id: str):
                 db = SessionLocal()
                 try:
                     for ch in event_changes:
-                        _persist_event_change(db, ch, video_id, user_id, now)
+                        _persist_event_change(db, ch, video_id, user_id)
                         # 更新活跃事件跟踪
                         key = (ch.person_id, ch.event_type)
                         if ch.change_type == 'ended':
@@ -436,7 +436,7 @@ async def detect_ws(video_id: str):
             break
 
 
-def _persist_event_change(db, ch, video_id: str, user_id: int, now: float):
+def _persist_event_change(db, ch, video_id: str, user_id: int):
     """将事件变更写入数据库"""
     if ch.change_type == 'started':
         # 事件开始：使用 EventChange 中的时间
@@ -453,22 +453,24 @@ def _persist_event_change(db, ch, video_id: str, user_id: int, now: float):
         )
         db.add(event)
     elif ch.change_type == 'risk_upgraded':
-        # 风险升级：更新 risk_level, frame_count, end_time
+        # 风险升级：使用 start_time 精确匹配事件
         db.query(Event).filter(
             Event.video_id == video_id,
             Event.person_id == ch.person_id,
             Event.event_type == ch.event_type,
+            Event.start_time == datetime.fromtimestamp(ch.start_ts),
         ).update({
             'risk_level': ch.risk_level,
             'frame_count': ch.frame_count,
             'end_time': datetime.fromtimestamp(ch.start_ts),
         })
     elif ch.change_type == 'ended':
-        # 事件结束：使用 EventChange 中的结束时间
+        # 事件结束：使用 start_time 精确匹配事件
         db.query(Event).filter(
             Event.video_id == video_id,
             Event.person_id == ch.person_id,
             Event.event_type == ch.event_type,
+            Event.start_time == datetime.fromtimestamp(ch.start_ts),
         ).update({
             'end_time': datetime.fromtimestamp(ch.end_ts),
             'frame_count': ch.frame_count,
