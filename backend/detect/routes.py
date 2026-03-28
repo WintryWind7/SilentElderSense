@@ -16,6 +16,8 @@ import cv2
 import numpy as np
 from core import FallDetector
 from .risk_engine import risk_engine, RISK_COLORS_BGR, RISK_REASON_LABELS
+from .service import get_detection_config_service
+from .models import DetectionConfig
 from auth.utils import token_required
 from auth.models import get_db
 from events.models import Event
@@ -501,3 +503,54 @@ def build_response(detected: bool, risk_results) -> dict:
             for r in risk_results
         ],
     }
+
+
+# ── 检测配置接口 ──────────────────────────
+
+@detect_bp.route('/api/detect/config', methods=['GET'])
+@token_required
+async def get_detect_config():
+    """获取当前用户的检测配置"""
+    user_id = request.current_user['user_id']
+    service = get_detection_config_service()
+    config = service.get_config(user_id)
+    return jsonify(config.to_dict())
+
+
+@detect_bp.route('/api/detect/config', methods=['PUT'])
+@token_required
+async def update_detect_config():
+    """
+    更新当前用户的检测配置
+
+    请求体:
+    {
+        "fallen_confirm_frames": 5,
+        "fallen_escalate_secs": 1.0,
+        "stillness_window_secs": 30.0,
+        "stillness_movement_threshold": 5.0,
+        "stillness_escalate_secs": 60.0,
+        "night_start_hour": 22,
+        "night_end_hour": 7,
+        "lost_grace_secs": 1.0
+    }
+    """
+    user_id = request.current_user['user_id']
+    data = await request.get_json()
+
+    # 过滤有效字段
+    valid_fields = [
+        'fallen_confirm_frames', 'fallen_escalate_secs',
+        'stillness_window_secs', 'stillness_movement_threshold',
+        'stillness_escalate_secs', 'night_start_hour',
+        'night_end_hour', 'lost_grace_secs'
+    ]
+    kwargs = {k: v for k, v in data.items() if k in valid_fields}
+
+    service = get_detection_config_service()
+    config = service.update_config(user_id, **kwargs)
+
+    return jsonify({
+        'message': '检测配置更新成功',
+        'config': config.to_dict()
+    })

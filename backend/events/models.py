@@ -33,7 +33,7 @@ class Event(Base):
     handled_at = Column(DateTime, nullable=True)  # 处理时间
     handled_by = Column(Integer, nullable=True)  # 处理人ID
 
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
 
     @property
     def duration(self):

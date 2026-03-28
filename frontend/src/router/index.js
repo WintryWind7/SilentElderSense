@@ -42,7 +42,7 @@ const routes = [
         path: 'system',
         name: 'System',
         component: () => import('@/views/System.vue'),
-        meta: { title: '系统管理', role: 'admin' }
+        meta: { title: '系统设置' }
       }
     ]
   },
@@ -64,14 +64,13 @@ router.beforeEach((to, from, next) => {
   const authStore = useAuthStore()
   // 使用 isAuthenticated（已同时检查 token 和 user）
   const isAuthenticated = authStore.isAuthenticated
-  const userRole = authStore.user?.role
 
   if (to.meta.requiresAuth && !isAuthenticated) {
     // 未登录，跳转到登录页
     next('/login')
-  } else if (to.meta.role && to.meta.role !== userRole) {
-    // 权限不足，返回上一页
-    next(from.path)
+  } else if (to.meta.role === 'admin' && !authStore.isAdmin) {
+    // 权限不足，返回上一页或跳转到首页
+    next(from.path || '/dashboard')
   } else {
     next()
   }
