@@ -43,3 +43,31 @@ export function getEventStats(params) {
     params
   })
 }
+
+// 获取小时级事件趋势
+export function getHourlyTrend(params) {
+  return request({
+    url: '/events/hourly',
+    method: 'get',
+    params
+  })
+}
+
+// 获取每日事件趋势
+export function getDailyTrend(params) {
+  return request({
+    url: '/events/daily',
+    method: 'get',
+    params
+  })
+}
+
+// 导出事件数据
+export function exportEvents(params) {
+  return request({
+    url: '/events/export',
+    method: 'get',
+    params,
+    responseType: 'blob'
+  })
+}

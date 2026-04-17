@@ -11,14 +11,13 @@ import uuid
 import asyncio
 import base64
 import struct
+import json
 from quart import Blueprint, jsonify, request, websocket
 import cv2
 import numpy as np
-from core import FallDetector
-from .risk_engine import risk_engine, RISK_COLORS_BGR, RISK_REASON_LABELS
-from .service import get_detection_config_service
-from .models import DetectionConfig
-from auth.utils import token_required
+from secure_core import SecureCore
+from secure_core.risk_engine import RISK_COLORS_BGR, RISK_REASON_LABELS
+from auth.utils import token_required, role_required
 from auth.models import get_db
 from events.models import Event
 from alerts.service import AlertService
@@ -28,21 +27,24 @@ detect_bp = Blueprint('detect', __name__)
 
 # 视频存储目录
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), '..', 'data', 'videos')
+SNAPSHOT_DIR = os.path.join(os.path.dirname(__file__), '..', 'data', 'snapshots')
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(SNAPSHOT_DIR, exist_ok=True)
 
-# 全局检测器实例
-_detector = None
+# 全局 SecureCore 实例
+_secure_core = None
 
 # 视频处理状态存储
 video_status = {}  # video_id -> {status, progress, results, total_frames}
 
 
-def get_detector() -> FallDetector:
-    """获取全局检测器实例"""
-    global _detector
-    if _detector is None:
-        _detector = FallDetector(model_path="core/models/fall_detection_v1.onnx")
-    return _detector
+def get_secure_core() -> SecureCore:
+    """获取全局可信核心实例"""
+    global _secure_core
+    if _secure_core is None:
+        _secure_core = SecureCore()
+        _secure_core.initialize()
+    return _secure_core
 
 
 @detect_bp.route('/api/video/upload', methods=['POST'])
@@ -90,6 +92,10 @@ async def process_video_ws(video_id: str):
     """
     WebSocket 视频处理
 
+    查询参数:
+        persist: 是否持久化事件到数据库
+        user_id: 用户ID（持久化模式下必需）
+
     发送格式:
     {
         "type": "progress" | "frame" | "complete" | "error",
@@ -100,6 +106,13 @@ async def process_video_ws(video_id: str):
         "results": [...]          // 完成时
     }
     """
+    # 获取查询参数
+    query_string = websocket.query_string or b''
+    from urllib.parse import parse_qs
+    params = parse_qs(query_string.decode())
+    persist = params.get('persist', ['false'])[0].lower() == 'true'
+    user_id = int(params.get('user_id', [0])[0]) if persist else 0
+
     # 查找视频文件
     video_path = None
     for ext in ['.mp4', '.avi', '.mov', '.mkv', '.webm']:
@@ -113,9 +126,39 @@ async def process_video_ws(video_id: str):
         await websocket.close()
         return
 
-    detector = get_detector()
-    session_id = detector.create_session()
-    risk_engine.create_session(session_id, is_live=False)
+    core = get_secure_core()
+    session_info = core.start_session(is_live=persist, user_id=user_id if persist else None)
+    session_id = session_info["session_id"]
+
+    # 持久化模式下的活跃事件跟踪
+    active_events = {} if persist else None
+    last_db_update = time.time() if persist else 0
+
+    async def update_active_events_end_time():
+        """每秒更新活跃事件的 end_time（持久化模式）"""
+        nonlocal last_db_update
+        if not persist or not active_events:
+            return
+        now = time.time()
+        if now - last_db_update < 1.0:
+            return
+        from auth.models import SessionLocal
+        db = SessionLocal()
+        try:
+            now_dt = datetime.fromtimestamp(now)
+            for (person_id, event_type) in active_events.keys():
+                db.query(Event).filter(
+                    Event.video_id == video_id,
+                    Event.person_id == person_id,
+                    Event.event_type == event_type,
+                ).update({'end_time': now_dt})
+            db.commit()
+            last_db_update = now
+        except Exception as e:
+            print(f"[ERROR] 更新 end_time 失败: {e}")
+            db.rollback()
+        finally:
+            db.close()
 
     try:
         cap = cv2.VideoCapture(video_path)
@@ -132,7 +175,8 @@ async def process_video_ws(video_id: str):
             'type': 'info',
             'total_frames': total_frames,
             'fps': fps,
-            'frame_interval': frame_interval
+            'frame_interval': frame_interval,
+            'persist': persist
         })
 
         frame_count = 0
@@ -150,25 +194,46 @@ async def process_video_ws(video_id: str):
                 frame_time = frame_count / fps
                 resized = cv2.resize(frame, (640, 480))
 
-                # 检测
-                result = await detector.process_frame_async(session_id, resized)
+                # 通过 SecureCore 处理帧
+                core_result = await core.process_frame_async(session_id, resized)
+                processed = core_result.processed_frame  # 已模糊的帧
                 now = time.time()
 
-                # 风险判定
-                risk_results, _ = risk_engine.process(
-                    session_id, result.frame_result.persons, now
-                )
+                risk_results = core_result.risk_results
+                event_changes = core_result.event_changes
 
-                # 在帧上绘制风险框
+                # 持久化事件变更（持久化模式）
+                if persist and event_changes and user_id:
+                    from auth.models import SessionLocal
+                    db = SessionLocal()
+                    try:
+                        for ch in event_changes:
+                            _persist_event_change(db, ch, video_id, user_id,
+                                                  core.core_hash, core.model_version,
+                                                  snapshot_frame=processed)
+                            key = (ch.person_id, ch.event_type)
+                            if ch.change_type == 'ended':
+                                active_events.pop(key, None)
+                            else:
+                                active_events[key] = now
+                        db.commit()
+                    except Exception as e:
+                        print(f"[ERROR] 事件持久化失败: {e}")
+                        db.rollback()
+                    finally:
+                        db.close()
+                    await update_active_events_end_time()
+
+                # 在已模糊的帧上绘制风险框
                 for risk in risk_results:
                     x1, y1, x2, y2 = [int(x) for x in risk.box]
                     color = RISK_COLORS_BGR.get(risk.risk_level, (0, 255, 0))
-                    cv2.rectangle(resized, (x1, y1), (x2, y2), color, 2)
-                    cv2.putText(resized, risk.risk_level, (x1, y1 - 8),
+                    cv2.rectangle(processed, (x1, y1), (x2, y2), color, 2)
+                    cv2.putText(processed, risk.risk_level, (x1, y1 - 8),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
                 # 编码帧图像
-                _, buffer = cv2.imencode('.jpg', resized, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                _, buffer = cv2.imencode('.jpg', processed, [cv2.IMWRITE_JPEG_QUALITY, 80])
                 frame_hex = buffer.tobytes().hex()
 
                 frame_result = {
@@ -200,8 +265,24 @@ async def process_video_ws(video_id: str):
                 })
 
         cap.release()
-        detector.close_session(session_id)
-        risk_engine.close_session(session_id)
+
+        # 持久化模式下关闭会话时处理未结束的事件
+        ended_changes = core.close_session(session_id, now=time.time()) if persist else None
+        if persist and ended_changes and user_id:
+            from auth.models import SessionLocal
+            db = SessionLocal()
+            try:
+                for ch in ended_changes:
+                    _persist_event_change(db, ch, video_id, user_id,
+                                          core.core_hash, core.model_version)
+                db.commit()
+            except Exception as e:
+                print(f"[ERROR] 事件持久化失败: {e}")
+                db.rollback()
+            finally:
+                db.close()
+        else:
+            core.close_session(session_id)
 
         await websocket.send_json({
             'type': 'complete',
@@ -220,32 +301,35 @@ async def process_video_ws(video_id: str):
 
 @detect_bp.route('/api/session/create', methods=['POST'])
 @token_required
+@role_required('user', 'admin')
 async def create_session():
     """创建实时检测会话（需要登录）"""
     user_id = request.current_user['user_id']
 
-    detector = get_detector()
-    video_id = detector.create_session()
-    risk_engine.create_session(video_id, is_live=True, user_id=user_id)
+    core = get_secure_core()
+    session_info = core.start_session(is_live=True, user_id=user_id)
+    video_id = session_info["session_id"]
+
     return jsonify({'video_id': video_id, 'user_id': user_id})
 
 
 @detect_bp.route('/api/session/close/<video_id>', methods=['POST'])
 @token_required
+@role_required('user', 'admin')
 async def close_session(video_id: str):
     """关闭实时检测会话"""
     user_id = request.current_user['user_id']
-    detector = get_detector()
+    core = get_secure_core()
     now = time.time()
-    ended_changes = risk_engine.close_session(video_id, now=now)
-    detector.close_session(video_id)
+    ended_changes = core.close_session(video_id, now=now)
 
     if ended_changes:
         from auth.models import SessionLocal
         db = SessionLocal()
         try:
             for ch in ended_changes:
-                _persist_event_change(db, ch, video_id, user_id)
+                _persist_event_change(db, ch, video_id, user_id,
+                                      core.core_hash, core.model_version)
             db.commit()
         except Exception as e:
             print(f"[ERROR] 事件持久化失败: {e}")
@@ -276,9 +360,9 @@ async def close_session(video_id: str):
 @detect_bp.websocket('/ws/detect/<video_id>')
 async def detect_ws(video_id: str):
     """WebSocket 实时帧检测（摄像头）- 跳帧策略，跳过队列中的旧帧"""
-    detector = get_detector()
+    core = get_secure_core()
 
-    if detector.session_manager.get_session(video_id) is None:
+    if core.session_manager.get_session(video_id) is None:
         await websocket.send_json({'type': 'error', 'message': 'Invalid video_id'})
         await websocket.close()
         return
@@ -302,7 +386,7 @@ async def detect_ws(video_id: str):
         if not active_events:
             return
 
-        user_id = risk_engine.get_user_id(video_id)
+        user_id = core.get_user_id(video_id)
         if not user_id:
             return
 
@@ -330,19 +414,25 @@ async def detect_ws(video_id: str):
 
         resized = cv2.resize(frame, (640, 480))
 
-        result = await detector.process_frame_async(video_id, resized)
+        # 通过 SecureCore 处理
+        core_result = await core.process_frame_async(video_id, resized)
+        processed = core_result.processed_frame  # 已模糊的帧
         now = time.time()
-        risk_results, event_changes = risk_engine.process(video_id, result.frame_result.persons, now)
+
+        risk_results = core_result.risk_results
+        event_changes = core_result.event_changes
 
         # 持久化事件变更
         if event_changes:
-            user_id = risk_engine.get_user_id(video_id)
+            user_id = core.get_user_id(video_id)
             if user_id:
                 from auth.models import SessionLocal
                 db = SessionLocal()
                 try:
                     for ch in event_changes:
-                        _persist_event_change(db, ch, video_id, user_id)
+                        _persist_event_change(db, ch, video_id, user_id,
+                                          core.core_hash, core.model_version,
+                                          snapshot_frame=processed)
                         # 更新活跃事件跟踪
                         key = (ch.person_id, ch.event_type)
                         if ch.change_type == 'ended':
@@ -359,16 +449,16 @@ async def detect_ws(video_id: str):
         # 每秒更新活跃事件的 end_time
         await update_active_events_end_time()
 
-        # 绘制检测框
+        # 在已模糊的帧上绘制检测框
         for risk in risk_results:
             x1, y1, x2, y2 = [int(x) for x in risk.box]
             color = RISK_COLORS_BGR.get(risk.risk_level, (0, 255, 0))
-            cv2.rectangle(resized, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(resized, risk.risk_level, (x1, y1 - 8),
+            cv2.rectangle(processed, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(processed, risk.risk_level, (x1, y1 - 8),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
         # 编码帧图像
-        _, buffer = cv2.imencode('.jpg', resized, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        _, buffer = cv2.imencode('.jpg', processed, [cv2.IMWRITE_JPEG_QUALITY, 80])
         frame_hex = buffer.tobytes().hex()
 
         processed_count += 1
@@ -438,19 +528,38 @@ async def detect_ws(video_id: str):
             break
 
 
-def _persist_event_change(db, ch, video_id: str, user_id: int):
+def _persist_event_change(db, ch, video_id: str, user_id: int,
+                          core_hash: str = "", model_version: str = "",
+                          snapshot_frame=None):
     """将事件变更写入数据库"""
     if ch.change_type == 'started':
+        # 匿名化 person_id
+        from secure_core.event_builder import EventBuilder
+        anon_person_id = EventBuilder.anonymize_id(ch.person_id)
+
+        # 保存模糊帧快照
+        snapshot_path = None
+        if snapshot_frame is not None:
+            filename = f"evt_{video_id}_{ch.person_id}_{int(ch.start_ts)}.jpg"
+            filepath = os.path.join(SNAPSHOT_DIR, filename)
+            cv2.imwrite(filepath, snapshot_frame)
+            snapshot_path = filepath
+
         # 事件开始：使用 EventChange 中的时间
         event = Event(
             user_id=user_id,
             video_id=video_id,
             person_id=ch.person_id,
+            anon_person_id=anon_person_id,
             event_type=ch.event_type,
             risk_level=ch.risk_level,
             start_time=datetime.fromtimestamp(ch.start_ts),
             end_time=datetime.fromtimestamp(ch.start_ts),
             frame_count=ch.frame_count,
+            snapshot_path=snapshot_path,
+            feature_summary=json.dumps(ch.feature_summary, ensure_ascii=False) if ch.feature_summary else None,
+            core_hash=core_hash,
+            model_version=model_version,
             status='pending',
         )
         db.add(event)
@@ -509,8 +618,10 @@ def build_response(detected: bool, risk_results) -> dict:
 
 @detect_bp.route('/api/detect/config', methods=['GET'])
 @token_required
+@role_required('user', 'admin')
 async def get_detect_config():
     """获取当前用户的检测配置"""
+    from .service import get_detection_config_service
     user_id = request.current_user['user_id']
     service = get_detection_config_service()
     config = service.get_config(user_id)
@@ -519,6 +630,7 @@ async def get_detect_config():
 
 @detect_bp.route('/api/detect/config', methods=['PUT'])
 @token_required
+@role_required('user', 'admin')
 async def update_detect_config():
     """
     更新当前用户的检测配置
@@ -535,6 +647,7 @@ async def update_detect_config():
         "lost_grace_secs": 1.0
     }
     """
+    from .service import get_detection_config_service
     user_id = request.current_user['user_id']
     data = await request.get_json()
 
@@ -543,7 +656,8 @@ async def update_detect_config():
         'fallen_confirm_frames', 'fallen_escalate_secs',
         'stillness_window_secs', 'stillness_movement_threshold',
         'stillness_escalate_secs', 'night_start_hour',
-        'night_end_hour', 'lost_grace_secs'
+        'night_end_hour', 'lost_grace_secs',
+        'face_detection_confidence', 'face_blur_strength', 'face_blur_expand_ratio'
     ]
     kwargs = {k: v for k, v in data.items() if k in valid_fields}
 

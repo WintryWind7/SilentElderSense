@@ -6,6 +6,16 @@
       <div class="bg-grid"></div>
     </div>
 
+    <!-- 隐私保护提示 -->
+    <div class="privacy-notice" v-if="privacyNotice">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+        <path d="M2 17l10 5 10-5"/>
+        <path d="M2 12l10 5 10-5"/>
+      </svg>
+      <span>{{ privacyNotice }}</span>
+    </div>
+
     <!-- 页面头部 -->
     <header class="page-header">
       <div class="header-left">
@@ -211,7 +221,7 @@
                   <td>
                     <div class="type-cell">
                       <span class="type-icon" :class="getTypeClass(event.event_type)">
-                        <svg v-if="event.event_type === 'FALL'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <svg v-if="event.event_type === 'FALLEN'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                           <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
                         </svg>
                         <svg v-else-if="event.event_type === 'STILLNESS'" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -285,7 +295,7 @@
 <script setup>
 import { ref, computed, onMounted, nextTick, watch, h } from 'vue'
 import * as echarts from 'echarts'
-import { getEvents, getEventStats } from '@/api/events'
+import { getEvents, getEventStats, getDailyTrend, exportEvents } from '@/api/events'
 
 // 时间范围选项
 const timeRanges = [
@@ -299,6 +309,7 @@ const timeRange = ref('week')
 const customDateRange = ref(null)
 const loading = ref(false)
 const searchQuery = ref('')
+const privacyNotice = ref('')
 
 // 图表引用
 const trendChartRef = ref(null)
@@ -319,6 +330,7 @@ const stats = ref({
   by_risk: {},
   by_status: {}
 })
+const dailyTrendData = ref({ dates: [], by_type: {} })
 
 const currentPage = ref(1)
 const pageSize = ref(20)
@@ -328,55 +340,61 @@ const totalPages = computed(() => Math.ceil(total.value / pageSize.value) || 1)
 
 // 事件类型配置
 const eventTypes = [
-  { key: 'FALL', label: '跌倒检测', color: '#f97316' },
+  { key: 'FALLEN', label: '跌倒检测', color: '#f97316' },
   { key: 'STILLNESS', label: '长时间静止', color: '#eab308' },
-  { key: 'NIGHT_ACTIVITY', label: '夜间异常活动', color: '#3b82f6' }
+  { key: 'NIGHT_ABNORMAL', label: '夜间异常活动', color: '#3b82f6' }
 ]
 
 // 统计卡片数据
-const summaryStats = computed(() => [
-  {
-    label: '总事件数',
-    value: stats.value.total,
-    progress: Math.min((stats.value.total / 100) * 100, 100),
-    trend: 5.2,
-    color: '#f97316',
-    icon: h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2' }, [
-      h('path', { d: 'M22 12h-4l-3 9L9 3l-3 9H2' })
-    ])
-  },
-  {
-    label: '高风险事件',
-    value: stats.value.by_risk?.HIGH || 0,
-    progress: stats.value.total > 0 ? ((stats.value.by_risk?.HIGH || 0) / stats.value.total) * 100 : 0,
-    trend: -2.1,
-    color: '#ef4444',
-    icon: h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2' }, [
-      h('path', { d: 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z' })
-    ])
-  },
-  {
-    label: '待处理',
-    value: stats.value.by_status?.pending || 0,
-    progress: stats.value.total > 0 ? ((stats.value.by_status?.pending || 0) / stats.value.total) * 100 : 0,
-    color: '#eab308',
-    icon: h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2' }, [
-      h('circle', { cx: '12', cy: '12', r: '10' }),
-      h('polyline', { points: '12 6 12 12 16 14' })
-    ])
-  },
-  {
-    label: '已确认',
-    value: stats.value.by_status?.confirmed || 0,
-    progress: stats.value.total > 0 ? ((stats.value.by_status?.confirmed || 0) / stats.value.total) * 100 : 0,
-    trend: 8.5,
-    color: '#10b981',
-    icon: h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2' }, [
-      h('path', { d: 'M22 11.08V12a10 10 0 1 1-5.93-9.14' }),
-      h('polyline', { points: '22 4 12 14.01 9 11.01' })
-    ])
-  }
-])
+const summaryStats = computed(() => {
+  const s = stats.value
+  const t = s.trends || {}
+  const d = s.display || {}
+
+  return [
+    {
+      label: '总事件数',
+      value: d.total ?? s.total,
+      progress: Math.min((s.total / 100) * 100, 100),
+      trend: t.total,
+      color: '#f97316',
+      icon: h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2' }, [
+        h('path', { d: 'M22 12h-4l-3 9L9 3l-3 9H2' })
+      ])
+    },
+    {
+      label: '高风险事件',
+      value: d.by_risk?.HIGH ?? (s.by_risk?.HIGH || 0),
+      progress: s.total > 0 ? ((s.by_risk?.HIGH || 0) / s.total) * 100 : 0,
+      trend: t.by_risk?.HIGH,
+      color: '#ef4444',
+      icon: h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2' }, [
+        h('path', { d: 'M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z' })
+      ])
+    },
+    {
+      label: '待处理',
+      value: d.by_status?.pending ?? (s.by_status?.pending || 0),
+      progress: s.total > 0 ? ((s.by_status?.pending || 0) / s.total) * 100 : 0,
+      color: '#eab308',
+      icon: h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2' }, [
+        h('circle', { cx: '12', cy: '12', r: '10' }),
+        h('polyline', { points: '12 6 12 12 16 14' })
+      ])
+    },
+    {
+      label: '已确认',
+      value: d.by_status?.confirmed ?? (s.by_status?.confirmed || 0),
+      progress: s.total > 0 ? ((s.by_status?.confirmed || 0) / s.total) * 100 : 0,
+      trend: t.by_status?.confirmed,
+      color: '#10b981',
+      icon: h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2' }, [
+        h('path', { d: 'M22 11.08V12a10 10 0 1 1-5.93-9.14' }),
+        h('polyline', { points: '22 4 12 14.01 9 11.01' })
+      ])
+    }
+  ]
+})
 
 // 过滤后的事件数据
 const filteredEvents = computed(() => {
@@ -391,7 +409,7 @@ const filteredEvents = computed(() => {
 
 // 工具函数
 const getTypeLabel = (type) => {
-  const map = { FALL: '跌倒检测', STILLNESS: '长时间静止', NIGHT_ACTIVITY: '夜间异常活动' }
+  const map = { FALLEN: '跌倒检测', STILLNESS: '长时间静止', NIGHT_ABNORMAL: '夜间异常活动' }
   return map[type] || type
 }
 
@@ -406,7 +424,7 @@ const getStatusLabel = (status) => {
 }
 
 const getTypeClass = (type) => {
-  const map = { FALL: 'type-fall', STILLNESS: 'type-stillness', NIGHT_ACTIVITY: 'type-night' }
+  const map = { FALLEN: 'type-fall', STILLNESS: 'type-stillness', NIGHT_ABNORMAL: 'type-night' }
   return map[type] || ''
 }
 
@@ -452,14 +470,17 @@ const loadData = async () => {
   loading.value = true
   try {
     const days = getDaysByRange()
-    const [eventsRes, statsRes] = await Promise.all([
+    const [eventsRes, statsRes, trendRes] = await Promise.all([
       getEvents({ page: currentPage.value, per_page: pageSize.value }),
-      getEventStats({ days })
+      getEventStats({ days }),
+      getDailyTrend({ days })
     ])
 
     eventsData.value = eventsRes.events || []
     total.value = eventsRes.total || 0
     stats.value = statsRes
+    privacyNotice.value = statsRes.privacy_notice || ''
+    dailyTrendData.value = trendRes
 
     updateCharts()
   } catch (error) {
@@ -483,7 +504,8 @@ const initTrendChart = () => {
 
 const updateTrendChart = () => {
   if (!trendChart) return
-  const s = stats.value
+  const trend = dailyTrendData.value
+  const dates = trend.dates || ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
 
   trendChart.setOption({
     ...chartTheme,
@@ -507,7 +529,7 @@ const updateTrendChart = () => {
     },
     xAxis: {
       type: 'category',
-      data: ['周一', '周二', '周三', '周四', '周五', '周六', '周日'],
+      data: dates,
       axisLine: { lineStyle: { color: 'rgba(255,255,255,0.1)' } },
       axisLabel: { color: 'rgba(255,255,255,0.5)' }
     },
@@ -524,7 +546,7 @@ const updateTrendChart = () => {
         name: '跌倒检测',
         type: 'line',
         smooth: true,
-        data: [s.by_type?.FALL ? Math.floor(s.by_type.FALL / 7) : 2, 3, 2, 4, 3, 2, 1],
+        data: trend.by_type?.FALLEN || [],
         lineStyle: { width: 3, color: '#f97316' },
         itemStyle: { color: '#f97316' },
         areaStyle: {
@@ -538,7 +560,7 @@ const updateTrendChart = () => {
         name: '长时间静止',
         type: 'line',
         smooth: true,
-        data: [s.by_type?.STILLNESS ? Math.floor(s.by_type.STILLNESS / 7) : 3, 4, 3, 2, 4, 3, 2],
+        data: trend.by_type?.STILLNESS || [],
         lineStyle: { width: 3, color: '#eab308' },
         itemStyle: { color: '#eab308' },
         areaStyle: {
@@ -552,7 +574,7 @@ const updateTrendChart = () => {
         name: '夜间异常活动',
         type: 'line',
         smooth: true,
-        data: [s.by_type?.NIGHT_ACTIVITY ? Math.floor(s.by_type.NIGHT_ACTIVITY / 7) : 1, 2, 1, 2, 1, 2, 1],
+        data: trend.by_type?.NIGHT_ABNORMAL || [],
         lineStyle: { width: 3, color: '#3b82f6' },
         itemStyle: { color: '#3b82f6' },
         areaStyle: {
@@ -659,9 +681,9 @@ const updateTypeChart = () => {
         }
       },
       data: [
-        { value: s.by_type?.FALL || 0, name: '跌倒检测', itemStyle: { color: '#f97316' } },
+        { value: s.by_type?.FALLEN || 0, name: '跌倒检测', itemStyle: { color: '#f97316' } },
         { value: s.by_type?.STILLNESS || 0, name: '长时间静止', itemStyle: { color: '#eab308' } },
-        { value: s.by_type?.NIGHT_ACTIVITY || 0, name: '夜间异常', itemStyle: { color: '#3b82f6' } }
+        { value: s.by_type?.NIGHT_ABNORMAL || 0, name: '夜间异常', itemStyle: { color: '#3b82f6' } }
       ]
     }]
   })
@@ -746,9 +768,21 @@ const handlePageChange = (page) => {
   loadData()
 }
 
-const handleExport = () => {
-  // 导出功能
-  console.log('Export report')
+const handleExport = async () => {
+  try {
+    const days = getDaysByRange()
+    const response = await exportEvents({ days })
+    // 创建下载链接
+    const blob = new Blob([response], { type: 'text/csv;charset=utf-8;' })
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(blob)
+    // 从响应头获取文件名，或使用默认名
+    link.download = `events_${new Date().toISOString().slice(0, 10)}.csv`
+    link.click()
+    URL.revokeObjectURL(link.href)
+  } catch (error) {
+    console.error('导出失败:', error)
+  }
 }
 
 onMounted(async () => {
@@ -803,6 +837,33 @@ watch(timeRange, () => {
     linear-gradient(rgba(255, 255, 255, 0.015) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
   background-size: 60px 60px;
+}
+
+/* 隐私保护提示 */
+.privacy-notice {
+  position: relative;
+  z-index: 1;
+  margin: 24px 32px 0;
+  background: rgba(59, 130, 246, 0.1);
+  border: 1px solid rgba(59, 130, 246, 0.2);
+  border-radius: var(--radius-lg);
+  padding: 12px 20px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--info-400);
+}
+
+.privacy-notice svg {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  opacity: 0.8;
+}
+
+.privacy-notice span {
+  line-height: 1.4;
 }
 
 /* 页面头部 */
@@ -913,7 +974,7 @@ watch(timeRange, () => {
 .stats-section {
   position: relative;
   z-index: 1;
-  padding: 24px 32px;
+  padding: 16px 32px 24px;
 }
 
 .stats-grid {

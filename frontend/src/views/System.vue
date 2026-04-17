@@ -27,8 +27,8 @@
             <component :is="tab.icon" />
           </span>
           <span class="tab-label">{{ tab.label }}</span>
+          <span class="tab-indicator"></span>
         </button>
-        <div class="tab-indicator" :style="indicatorStyle"></div>
       </div>
     </div>
 
@@ -396,6 +396,65 @@
               </div>
             </div>
           </div>
+
+          <!-- 人脸模糊参数 -->
+          <div class="settings-card">
+            <div class="card-header">
+              <div class="header-icon privacy">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                  <circle cx="12" cy="10" r="3"/>
+                </svg>
+              </div>
+              <div class="header-text">
+                <h3>人脸模糊</h3>
+                <p>隐私保护的人脸检测与模糊参数</p>
+              </div>
+            </div>
+            <div class="card-body">
+              <div class="form-grid">
+                <div class="form-group">
+                  <label class="form-label">检测置信度</label>
+                  <input
+                    v-model.number="detectConfig.face_detection_confidence"
+                    type="number"
+                    min="0.1"
+                    max="1.0"
+                    step="0.1"
+                    class="form-input"
+                    placeholder="0.5"
+                  />
+                  <span class="form-hint">人脸检测的最小置信度阈值（0.1-1.0）</span>
+                </div>
+                <div class="form-group">
+                  <label class="form-label">模糊强度</label>
+                  <input
+                    v-model.number="detectConfig.face_blur_strength"
+                    type="number"
+                    min="15"
+                    max="99"
+                    step="2"
+                    class="form-input"
+                    placeholder="51"
+                  />
+                  <span class="form-hint">模糊核大小，值越大越模糊（15-99，需为奇数）</span>
+                </div>
+                <div class="form-group">
+                  <label class="form-label">扩展比例</label>
+                  <input
+                    v-model.number="detectConfig.face_blur_expand_ratio"
+                    type="number"
+                    min="0"
+                    max="1.0"
+                    step="0.1"
+                    class="form-input"
+                    placeholder="0.5"
+                  />
+                  <span class="form-hint">模糊区域相对于人脸框的扩展比例</span>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- 保存按钮 -->
@@ -410,197 +469,44 @@
         </div>
       </section>
 
-      <!-- 告警历史 -->
-      <section v-show="activeTab === 'history'" class="content-section">
-        <div class="table-card">
+      <!-- 社区组选择（仅普通用户） -->
+      <section v-show="activeTab === 'community'" class="content-section">
+        <div class="settings-card">
           <div class="card-header">
             <div class="header-text">
-              <h3>告警历史记录</h3>
-              <p>查看所有告警通知记录</p>
+              <h3>社区组选择</h3>
+              <p>选择您所属的社区组，可随时切换</p>
             </div>
-            <button class="btn-refresh" @click="loadAlertHistory" :disabled="historyLoading">
-              <svg :class="{ spinning: historyLoading }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M23 4v6h-6"/>
-                <path d="M1 20v-6h6"/>
-                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
-              </svg>
-              <span>刷新</span>
-            </button>
           </div>
           <div class="card-body">
-            <div class="table-wrapper">
-              <table class="data-table">
-                <thead>
-                  <tr>
-                    <th>ID</th>
-                    <th>告警类型</th>
-                    <th>风险等级</th>
-                    <th>通知方式</th>
-                    <th>状态</th>
-                    <th>创建时间</th>
-                    <th>操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="alert in alertHistory" :key="alert.id" class="table-row">
-                    <td class="cell-id">#{{ alert.id }}</td>
-                    <td>
-                      <span class="type-badge">{{ getEventTypeLabel(alert.event_type) }}</span>
-                    </td>
-                    <td>
-                      <span class="risk-badge" :class="getRiskClass(alert.risk_level)">
-                        {{ getRiskLabel(alert.risk_level) }}
-                      </span>
-                    </td>
-                    <td class="cell-method">{{ alert.alert_type || '-' }}</td>
-                    <td>
-                      <span class="status-badge" :class="getStatusClass(alert.status)">
-                        <span class="status-dot"></span>
-                        {{ getStatusLabel(alert.status) }}
-                      </span>
-                    </td>
-                    <td class="cell-time">{{ formatDateTime(alert.created_at) }}</td>
-                    <td>
-                      <div class="action-btns">
-                        <button
-                          v-if="alert.status !== 'acknowledged'"
-                          class="action-btn confirm"
-                          @click="acknowledgeAlert(alert.id)"
-                        >
-                          确认
-                        </button>
-                        <button
-                          v-if="alert.status === 'failed'"
-                          class="action-btn retry"
-                          @click="resendAlert(alert.id)"
-                        >
-                          重发
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-              <div v-if="alertHistory.length === 0" class="empty-table">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                  <path d="M9 12l2 2 4-4"/>
-                  <circle cx="12" cy="12" r="10"/>
-                </svg>
-                <p>暂无告警记录</p>
+            <div class="form-group">
+              <label class="form-label">当前社区组</label>
+              <div v-if="currentCommunity" class="current-community">
+                <span class="community-name">{{ currentCommunity.name }}</span>
+                <span class="community-org">{{ currentCommunity.org_name }}</span>
+                <button class="btn-unbind" @click="unbindCommunity">取消绑定</button>
               </div>
+              <div v-else class="no-community">未选择社区组</div>
             </div>
-            <div class="pagination">
-              <div class="pagination-info">
-                共 <strong>{{ historyTotal }}</strong> 条记录
-              </div>
-              <div class="pagination-controls">
-                <button
-                  class="page-btn"
-                  :disabled="historyPage === 1"
-                  @click="handleHistoryPageChange(historyPage - 1)"
+            <div class="form-group">
+              <label class="form-label">选择社区组</label>
+              <input v-model="communitySearch" placeholder="搜索社区组..." class="form-input" @input="searchCommunities" />
+              <div class="community-list" v-if="availableGroups.length > 0">
+                <div
+                  v-for="g in availableGroups"
+                  :key="g.id"
+                  class="community-item"
+                  :class="{ selected: currentCommunity?.id === g.id }"
+                  @click="selectCommunity(g)"
                 >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M15 18l-6-6 6-6"/>
-                  </svg>
-                </button>
-                <span class="page-info">{{ historyPage }} / {{ historyTotalPages }}</span>
-                <button
-                  class="page-btn"
-                  :disabled="historyPage >= historyTotalPages"
-                  @click="handleHistoryPageChange(historyPage + 1)"
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M9 18l6-6-6-6"/>
-                  </svg>
-                </button>
+                  <div class="community-info">
+                    <span class="community-name">{{ g.name }}</span>
+                    <span class="community-meta">{{ g.org_name }} · {{ g.member_count }} 人</span>
+                  </div>
+                  <span v-if="currentCommunity?.id === g.id" class="check-mark">✓</span>
+                </div>
               </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- 告警统计 -->
-      <section v-show="activeTab === 'stats'" class="content-section">
-        <div class="stats-grid">
-          <div class="stat-card">
-            <div class="stat-icon total">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
-              </svg>
-            </div>
-            <div class="stat-content">
-              <span class="stat-value">{{ alertStats.total }}</span>
-              <span class="stat-label">总告警数</span>
-            </div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-icon success">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
-                <polyline points="22 4 12 14.01 9 11.01"/>
-              </svg>
-            </div>
-            <div class="stat-content">
-              <span class="stat-value">{{ alertStats.sent_count }}</span>
-              <span class="stat-label">已发送</span>
-            </div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-icon danger">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <circle cx="12" cy="12" r="10"/>
-                <line x1="15" y1="9" x2="9" y2="15"/>
-                <line x1="9" y1="9" x2="15" y2="15"/>
-              </svg>
-            </div>
-            <div class="stat-content">
-              <span class="stat-value">{{ alertStats.failed_count }}</span>
-              <span class="stat-label">发送失败</span>
-            </div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-icon percent">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <circle cx="12" cy="12" r="10"/>
-                <path d="M16 8l-8 8"/>
-                <circle cx="9" cy="9" r="1" fill="currentColor"/>
-                <circle cx="15" cy="15" r="1" fill="currentColor"/>
-              </svg>
-            </div>
-            <div class="stat-content">
-              <span class="stat-value">{{ successRate }}%</span>
-              <span class="stat-label">成功率</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- 图表区域 -->
-        <div class="charts-row">
-          <div class="chart-card">
-            <div class="card-header">
-              <h3>告警趋势</h3>
-            </div>
-            <div class="card-body">
-              <div class="chart-placeholder">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                  <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
-                </svg>
-                <p>近7天告警趋势图</p>
-              </div>
-            </div>
-          </div>
-          <div class="chart-card">
-            <div class="card-header">
-              <h3>类型分布</h3>
-            </div>
-            <div class="card-body">
-              <div class="chart-placeholder">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                  <path d="M21.21 15.89A10 10 0 1 1 8 2.83"/>
-                  <path d="M22 12A10 10 0 0 0 12 2v10z"/>
-                </svg>
-                <p>告警类型分布图</p>
-              </div>
+              <div v-else class="no-results">暂无可选社区组</div>
             </div>
           </div>
         </div>
@@ -614,68 +520,60 @@ import { ref, computed, onMounted, h } from 'vue'
 import {
   getAlertConfig,
   updateAlertConfig,
-  getAlertHistory,
   acknowledgeAlert as ackAlert,
-  resendAlert as resendAlertApi,
-  getAlertStats
+  resendAlert as resendAlertApi
 } from '@/api/alerts'
 import {
   getDetectConfig,
   updateDetectConfig
 } from '@/api/detect'
+import { getAvailableGroups, getUserCommunity, setUserCommunity } from '@/api/platform'
+import { useAuthStore } from '@/stores/auth'
 import { ElMessage } from 'element-plus'
 
 // 标签页配置
-const tabs = [
-  {
-    key: 'alert',
-    label: '告警配置',
-    icon: h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2' }, [
-      h('path', { d: 'M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9' }),
-      h('path', { d: 'M13.73 21a2 2 0 0 1-3.46 0' })
-    ])
-  },
-  {
-    key: 'detect',
-    label: '检测配置',
-    icon: h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2' }, [
-      h('circle', { cx: '12', cy: '12', r: '3' }),
-      h('path', { d: 'M12 1v6m0 6v10' }),
-      h('path', { d: 'M4.22 4.22l4.24 4.24m7.08 7.08l4.24 4.24' }),
-      h('path', { d: 'M1 12h6m6 0h10' }),
-      h('path', { d: 'M4.22 19.78l4.24-4.24m7.08-7.08l4.24-4.24' })
-    ])
-  },
-  {
-    key: 'history',
-    label: '告警历史',
-    icon: h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2' }, [
-      h('circle', { cx: '12', cy: '12', r: '10' }),
-      h('polyline', { points: '12 6 12 12 16 14' })
-    ])
-  },
-  {
-    key: 'stats',
-    label: '告警统计',
-    icon: h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2' }, [
-      h('line', { x1: '18', y1: '20', x2: '18', y2: '10' }),
-      h('line', { x1: '12', y1: '20', x2: '12', y2: '4' }),
-      h('line', { x1: '6', y1: '20', x2: '6', y2: '14' })
-    ])
+const authStore = useAuthStore()
+const isUser = computed(() => authStore.user?.role === 'user')
+
+const tabs = computed(() => {
+  const items = [
+    {
+      key: 'alert',
+      label: '告警配置',
+      icon: h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2' }, [
+        h('path', { d: 'M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9' }),
+        h('path', { d: 'M13.73 21a2 2 0 0 1-3.46 0' })
+      ])
+    },
+    {
+      key: 'detect',
+      label: '检测配置',
+      icon: h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2' }, [
+        h('circle', { cx: '12', cy: '12', r: '3' }),
+        h('path', { d: 'M12 1v6m0 6v10' }),
+        h('path', { d: 'M4.22 4.22l4.24 4.24m7.08 7.08l4.24 4.24' }),
+        h('path', { d: 'M1 12h6m6 0h10' }),
+        h('path', { d: 'M4.22 19.78l4.24-4.24m7.08-7.08l4.24-4.24' })
+      ])
+    },
+  ]
+  if (isUser.value) {
+    items.push({
+      key: 'community',
+      label: '社区组',
+      icon: h('svg', { viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': '2' }, [
+        h('path', { d: 'M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2' }),
+        h('circle', { cx: '9', cy: '7', r: '4' }),
+        h('path', { d: 'M23 21v-2a4 4 0 0 0-3-3.87' }),
+        h('path', { d: 'M16 3.13a4 4 0 0 1 0 7.75' })
+      ])
+    })
   }
-]
+  return items
+})
 
 const activeTab = ref('alert')
 const saving = ref(false)
-const historyLoading = ref(false)
-
-// 指示器样式
-const indicatorStyle = computed(() => {
-  const index = tabs.findIndex(t => t.key === activeTab.value)
-  return {
-    transform: `translateX(${index * 100}%)`
-  }
-})
 
 // 告警配置
 const alertConfig = ref({
@@ -702,29 +600,12 @@ const detectConfig = ref({
   stillness_escalate_secs: 60.0,
   night_start_hour: 22,
   night_end_hour: 7,
-  lost_grace_secs: 1.0
+  lost_grace_secs: 1.0,
+  face_detection_confidence: 0.5,
+  face_blur_strength: 51,
+  face_blur_expand_ratio: 0.5
 })
 const detectSaving = ref(false)
-
-// 告警历史
-const alertHistory = ref([])
-const historyPage = ref(1)
-const historyTotal = ref(0)
-const historyPageSize = 20
-
-const historyTotalPages = computed(() => Math.ceil(historyTotal.value / historyPageSize) || 1)
-
-// 告警统计
-const alertStats = ref({
-  total: 0,
-  sent_count: 0,
-  failed_count: 0
-})
-
-const successRate = computed(() => {
-  if (alertStats.value.total === 0) return 0
-  return ((alertStats.value.sent_count / alertStats.value.total) * 100).toFixed(1)
-})
 
 // 工具函数
 const getEventTypeLabel = (type) => {
@@ -848,25 +729,6 @@ const resetDetectConfig = () => {
   loadDetectConfig()
 }
 
-// 加载告警历史
-const loadAlertHistory = async () => {
-  historyLoading.value = true
-  try {
-    const response = await getAlertHistory({ page: historyPage.value, per_page: historyPageSize })
-    alertHistory.value = response.alerts || []
-    historyTotal.value = response.total || 0
-  } catch (error) {
-    console.error('加载告警历史失败:', error)
-  } finally {
-    historyLoading.value = false
-  }
-}
-
-const handleHistoryPageChange = (page) => {
-  historyPage.value = page
-  loadAlertHistory()
-}
-
 // 确认告警
 const acknowledgeAlert = async (alertId) => {
   try {
@@ -875,7 +737,6 @@ const acknowledgeAlert = async (alertId) => {
       message: '告警已确认',
       type: 'success'
     })
-    loadAlertHistory()
   } catch (error) {
     ElMessage({
       message: '确认失败',
@@ -892,7 +753,6 @@ const resendAlert = async (alertId) => {
       message: '告警已重发',
       type: 'success'
     })
-    loadAlertHistory()
   } catch (error) {
     ElMessage({
       message: '重发失败',
@@ -901,21 +761,52 @@ const resendAlert = async (alertId) => {
   }
 }
 
-// 加载统计
-const loadStats = async () => {
+// 社区组
+const communitySearch = ref('')
+const availableGroups = ref([])
+const currentCommunity = ref(null)
+
+async function loadUserCommunity() {
   try {
-    const stats = await getAlertStats({ days: 7 })
-    alertStats.value = stats
-  } catch (error) {
-    console.error('加载统计失败:', error)
+    const res = await getUserCommunity()
+    currentCommunity.value = res.community
+  } catch (e) { console.error(e) }
+}
+
+async function searchCommunities() {
+  try {
+    const res = await getAvailableGroups(communitySearch.value)
+    availableGroups.value = Array.isArray(res.data) ? res.data : res
+  } catch (e) { console.error(e) }
+}
+
+async function selectCommunity(group) {
+  try {
+    const res = await setUserCommunity(group.id)
+    currentCommunity.value = res.community
+    ElMessage.success('社区组已更新')
+  } catch (e) {
+    ElMessage.error('切换失败')
+  }
+}
+
+async function unbindCommunity() {
+  try {
+    await setUserCommunity(null)
+    currentCommunity.value = null
+    ElMessage.success('已取消绑定')
+  } catch (e) {
+    ElMessage.error('取消绑定失败')
   }
 }
 
 onMounted(() => {
   loadConfig()
   loadDetectConfig()
-  loadAlertHistory()
-  loadStats()
+  if (isUser.value) {
+    loadUserCommunity()
+    searchCommunities()
+  }
 })
 </script>
 
@@ -1036,13 +927,17 @@ onMounted(() => {
 .tab-indicator {
   position: absolute;
   bottom: 0;
-  left: 0;
-  width: calc(33.333% - 6px);
+  left: 8px;
+  right: 8px;
   height: 2px;
   background: linear-gradient(90deg, var(--primary-400), var(--primary-500));
   border-radius: 2px 2px 0 0;
-  transition: transform var(--transition-base);
-  margin-left: 8px;
+  opacity: 0;
+  transition: opacity var(--transition-base);
+}
+
+.tab-btn.active .tab-indicator {
+  opacity: 1;
 }
 
 /* 内容区域 */
@@ -1920,5 +1815,101 @@ onMounted(() => {
     flex-direction: column;
     align-items: stretch;
   }
+}
+
+/* 社区组选择样式 */
+.current-community {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: rgba(249, 115, 22, 0.1);
+  border: 1px solid rgba(249, 115, 22, 0.2);
+  border-radius: 10px;
+}
+
+.current-community .community-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: #f0f0f5;
+}
+
+.current-community .community-org {
+  font-size: 13px;
+  color: #888;
+}
+
+.btn-unbind {
+  margin-left: auto;
+  padding: 4px 12px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: 8px;
+  color: #f87171;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.no-community {
+  color: #888;
+  font-size: 14px;
+}
+
+.community-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.community-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.community-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.community-item.selected {
+  border-color: rgba(249, 115, 22, 0.3);
+  background: rgba(249, 115, 22, 0.05);
+}
+
+.community-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.community-info .community-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: #ddd;
+}
+
+.community-meta {
+  font-size: 12px;
+  color: #888;
+}
+
+.check-mark {
+  color: #f97316;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.no-results {
+  color: #666;
+  font-size: 14px;
+  padding: 16px;
+  text-align: center;
 }
 </style>

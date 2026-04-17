@@ -1,6 +1,6 @@
 from quart import Blueprint, request, jsonify
 from .models import User, get_db
-from .utils import generate_token, token_required
+from .utils import generate_token, token_required, admin_required
 
 auth_bp = Blueprint('auth', __name__)
 
@@ -20,7 +20,8 @@ async def register():
     # 创建新用户
     user = User(
         username=data['username'],
-        email=data.get('email')
+        email=data.get('email'),
+        role='user'
     )
     user.set_password(data['password'])
 
@@ -42,13 +43,16 @@ async def login():
 
     # 验证密码
     if user and user.check_password(data['password']):
-        token = generate_token(user.id, user.username)
+        token = generate_token(user.id, user.username, user.role)
         return jsonify({
             'message': '登录成功',
             'access_token': token,
             'token_type': 'Bearer',
             'user_id': user.id,
-            'username': user.username
+            'username': user.username,
+            'role': user.role,
+            'platform_org_id': user.platform_org_id,
+            'community_group_id': user.community_group_id,
         }), 200
     else:
         return jsonify({'error': '用户名或密码错误'}), 401
@@ -62,5 +66,32 @@ async def protected_route():
     return jsonify({
         'message': '这是一个受保护的路由',
         'user_id': user['user_id'],
-        'username': user['username']
+        'username': user['username'],
+        'role': user.get('role', 'user')
     }), 200
+
+
+@auth_bp.route('/api/users/platform', methods=['POST'])
+@token_required
+@admin_required
+async def create_platform_user():
+    """管理员创建平台用户"""
+    data = await request.get_json()
+    db = next(get_db())
+
+    existing = db.query(User).filter_by(username=data['username']).first()
+    if existing:
+        return jsonify({'error': '用户名已存在'}), 400
+
+    user = User(
+        username=data['username'],
+        email=data.get('email'),
+        role='platform',
+        platform_org_id=data.get('platform_org_id'),
+    )
+    user.set_password(data['password'])
+
+    db.add(user)
+    db.commit()
+
+    return jsonify({'message': '平台用户创建成功', 'username': user.username, 'role': user.role}), 201
