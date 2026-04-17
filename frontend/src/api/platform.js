@@ -23,15 +23,10 @@ export const suspendGroup = (groupId) => api.delete(`/platform/groups/${groupId}
 
 export const getMyProfile = () => api.get('/platform/profile')
 export const getMyCommunities = () => api.get('/platform/communities')
-export const getPlatformStats = (days = 7) => api.get('/platform/stats', { params: { days } })
-export const getPlatformDailyTrend = (days = 7) => api.get('/platform/stats/daily', { params: { days } })
-
-// ── 平台用户：下属用户管理 ──
-
-export const getMyUsers = () => api.get('/platform/my-users')
-export const createMyUser = (data) => api.post('/platform/my-users', data)
-export const updateMyUser = (userId, data) => api.put(`/platform/my-users/${userId}`, data)
-export const resetMyUserPassword = (userId, data) => api.post(`/platform/my-users/${userId}/reset-password`, data)
+export const getPlatformStats = (days = 7, communityGroupId = null) =>
+  api.get('/platform/stats', { params: { days, ...(communityGroupId && { community_group_id: communityGroupId }) } })
+export const getPlatformDailyTrend = (days = 7, communityGroupId = null) =>
+  api.get('/platform/stats/daily', { params: { days, ...(communityGroupId && { community_group_id: communityGroupId }) } })
 
 // ── 普通用户：社区组选择 ──
 

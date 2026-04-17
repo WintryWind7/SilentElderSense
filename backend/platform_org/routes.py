@@ -173,30 +173,20 @@ async def list_my_communities():
 
 # ── 平台用户：聚合统计 ──────────────────────────
 
-def _get_platform_user_ids(db, platform_user_id: int):
-    """获取平台用户下所有用户ID列表（支持直接关联和社区组间接关联）"""
-    # 方式1：通过 platform_user_id 直接关联
-    direct_users = [u.id for u in db.query(User).filter(
-        User.platform_user_id == platform_user_id,
-        User.role == 'user'
-    ).all()]
-
-    # 方式2：通过社区组间接关联（兼容旧数据）
-    group_ids = [g.id for g in db.query(CommunityGroup).filter(
+def _get_platform_user_ids(db, platform_user_id: int, community_group_id: int = None):
+    """获取平台用户下社区组的用户ID列表，可按单个社区组过滤"""
+    query = db.query(CommunityGroup).filter(
         CommunityGroup.platform_user_id == platform_user_id,
         CommunityGroup.status == 'active',
+    )
+    if community_group_id is not None:
+        query = query.filter(CommunityGroup.id == community_group_id)
+    group_ids = [g.id for g in query.all()]
+    if not group_ids:
+        return []
+    return [u.id for u in db.query(User).filter(
+        User.community_group_id.in_(group_ids),
     ).all()]
-
-    indirect_users = []
-    if group_ids:
-        indirect_users = [u.id for u in db.query(User).filter(
-            User.community_group_id.in_(group_ids),
-            User.role == 'user',
-            User.platform_user_id == None,  # 只取未直接关联的，避免重复
-        ).all()]
-
-    # 合并去重
-    return list(set(direct_users + indirect_users))
 
 
 @platform_bp.route('/api/platform/stats', methods=['GET'])
@@ -205,9 +195,10 @@ def _get_platform_user_ids(db, platform_user_id: int):
 async def platform_stats():
     user_id = request.current_user['user_id']
     days = int(request.args.get('days', 7))
+    community_group_id = request.args.get('community_group_id', type=int)
 
     db = next(get_db())
-    member_ids = _get_platform_user_ids(db, user_id)
+    member_ids = _get_platform_user_ids(db, user_id, community_group_id)
 
     now = datetime.now()
     start_date = now - timedelta(days=days)
@@ -251,7 +242,7 @@ async def platform_stats():
     cache = DPResultCache(ttl_minutes=10)
     svc = StatsService(budget_manager=bm, cache=cache)
 
-    query_key = f"stats_{days}days"
+    query_key = f"stats_{days}days_group_{community_group_id or 'all'}"
     try:
         private_result = svc.get_private_stats(
             user_id=f"platform_{user_id}",
@@ -289,9 +280,10 @@ async def platform_stats():
 async def platform_daily_trend():
     user_id = request.current_user['user_id']
     days = int(request.args.get('days', 7))
+    community_group_id = request.args.get('community_group_id', type=int)
 
     db = next(get_db())
-    member_ids = _get_platform_user_ids(db, user_id)
+    member_ids = _get_platform_user_ids(db, user_id, community_group_id)
     now = datetime.now()
     start_date = (now - timedelta(days=days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -313,9 +305,36 @@ async def platform_daily_trend():
         if date_key in daily_data and e.event_type in event_types:
             daily_data[date_key][e.event_type] += 1
 
+    budget_enabled = current_app.config.get('DP_BUDGET_ENABLED', True)
+    epsilon = current_app.config.get('DP_DEFAULT_EPSILON', 0.8)
+
+    import sys, os
+    sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from dp_stats.stats_service import StatsService
+    from dp_stats.budget_manager import BudgetManager
+    from dp_stats.cache_service import DPResultCache
+
+    bm = BudgetManager(daily_limit=3.0)
+    cache = DPResultCache(ttl_minutes=10)
+    svc = StatsService(budget_manager=bm, cache=cache)
+
+    query_key = f"daily_stats_{days}days_group_{community_group_id or 'all'}"
+    try:
+        private_result = svc.get_private_daily_trend(
+            user_id=f"platform_{user_id}",
+            query_key=query_key,
+            daily_data=daily_data,
+            epsilon=epsilon,
+            now=now,
+            check_budget=budget_enabled,
+        )
+        noisy_daily_data = private_result['value']
+    except ValueError as e:
+        return jsonify({'error': '隐私预算已用完，请稍后再试', 'detail': str(e)}), 429
+
     return jsonify({
         'dates': dates,
-        'by_type': {t: [daily_data[d][t] for d in dates] for t in event_types},
+        'by_type': {t: [noisy_daily_data[d].get(t, 0) for d in dates] for t in event_types},
     })
 
 
@@ -392,143 +411,3 @@ async def set_user_community():
     user.community_group_id = group_id
     db.commit()
     return jsonify({'message': '社区组已更新', 'community': group.to_dict()})
-
-
-# ── 平台用户：下属用户管理 ──────────────────────────
-
-@platform_bp.route('/api/platform/my-users', methods=['GET'])
-@token_required
-@role_required('platform')
-async def list_my_users():
-    """平台用户获取下属用户列表"""
-    platform_user_id = request.current_user['user_id']
-    db = next(get_db())
-
-    users = db.query(User).filter_by(
-        platform_user_id=platform_user_id,
-        role='user'
-    ).order_by(User.created_at.desc()).all()
-
-    result = []
-    for u in users:
-        group_name = None
-        if u.community_group_id:
-            group = db.query(CommunityGroup).filter_by(id=u.community_group_id).first()
-            group_name = group.name if group else None
-
-        result.append({
-            'id': u.id,
-            'username': u.username,
-            'email': u.email,
-            'community_group_id': u.community_group_id,
-            'community_group_name': group_name,
-            'created_at': u.created_at.isoformat() if u.created_at else None,
-        })
-
-    return jsonify(result)
-
-
-@platform_bp.route('/api/platform/my-users', methods=['POST'])
-@token_required
-@role_required('platform')
-async def create_my_user():
-    """平台用户创建下属普通用户"""
-    platform_user_id = request.current_user['user_id']
-    data = await request.get_json()
-    db = next(get_db())
-
-    # 验证用户名唯一
-    existing = db.query(User).filter_by(username=data['username']).first()
-    if existing:
-        return jsonify({'error': '用户名已存在'}), 400
-
-    # 验证社区组属于自己
-    community_group_id = data.get('community_group_id')
-    if community_group_id:
-        group = db.query(CommunityGroup).filter_by(
-            id=community_group_id,
-            platform_user_id=platform_user_id
-        ).first()
-        if not group:
-            return jsonify({'error': '社区组不存在或不属于您'}), 400
-
-    user = User(
-        username=data['username'],
-        email=data.get('email'),
-        role='user',
-        platform_user_id=platform_user_id,  # 自动绑定到自己
-        community_group_id=community_group_id,
-    )
-    user.set_password(data['password'])
-
-    db.add(user)
-    db.commit()
-
-    return jsonify({
-        'message': '用户创建成功',
-        'user_id': user.id,
-        'username': user.username,
-    }), 201
-
-
-@platform_bp.route('/api/platform/my-users/<int:user_id>', methods=['PUT'])
-@token_required
-@role_required('platform')
-async def update_my_user(user_id: int):
-    """平台用户更新下属用户"""
-    platform_user_id = request.current_user['user_id']
-    data = await request.get_json()
-    db = next(get_db())
-
-    # 验证用户属于自己
-    user = db.query(User).filter_by(
-        id=user_id,
-        platform_user_id=platform_user_id,
-        role='user'
-    ).first()
-    if not user:
-        return jsonify({'error': '用户不存在或不属于您'}), 404
-
-    # 更新字段
-    if 'email' in data:
-        user.email = data['email']
-
-    if 'community_group_id' in data:
-        community_group_id = data['community_group_id']
-        if community_group_id:
-            group = db.query(CommunityGroup).filter_by(
-                id=community_group_id,
-                platform_user_id=platform_user_id
-            ).first()
-            if not group:
-                return jsonify({'error': '社区组不存在或不属于您'}), 400
-        user.community_group_id = community_group_id
-
-    db.commit()
-    return jsonify({'message': '更新成功'})
-
-
-@platform_bp.route('/api/platform/my-users/<int:user_id>/reset-password', methods=['POST'])
-@token_required
-@role_required('platform')
-async def reset_my_user_password(user_id: int):
-    """平台用户重置下属用户密码"""
-    platform_user_id = request.current_user['user_id']
-    data = await request.get_json()
-    new_password = data.get('new_password')
-
-    if not new_password or len(new_password) < 4:
-        return jsonify({'error': '密码长度至少4位'}), 400
-
-    db = next(get_db())
-    user = db.query(User).filter_by(
-        id=user_id,
-        platform_user_id=platform_user_id,
-        role='user'
-    ).first()
-    if not user:
-        return jsonify({'error': '用户不存在或不属于您'}), 404
-
-    user.set_password(new_password)
-    db.commit()
-    return jsonify({'message': f'用户 {user.username} 密码已重置'})

@@ -51,13 +51,7 @@
     <section v-if="activeTab === 'groups'">
       <div class="section-header">
         <h3>社区组管理</h3>
-        <div class="filter-group">
-          <select v-model="selectedPlatformUserId" @change="loadGroups" class="filter-select">
-            <option value="">选择平台用户</option>
-            <option v-for="u in platformUsers" :key="u.id" :value="u.id">{{ u.org_name || u.username }}</option>
-          </select>
-          <button class="btn-primary" :disabled="!selectedPlatformUserId" @click="showCreateGroup = true">创建社区组</button>
-        </div>
+        <button class="btn-primary" @click="openCreateGroup">创建社区组</button>
       </div>
       <div class="table-wrapper">
         <table class="data-table">
@@ -65,6 +59,7 @@
             <tr>
               <th>ID</th>
               <th>名称</th>
+              <th>所属平台</th>
               <th>地址</th>
               <th>状态</th>
               <th>操作</th>
@@ -74,6 +69,7 @@
             <tr v-for="g in groups" :key="g.id">
               <td>{{ g.id }}</td>
               <td>{{ g.name }}</td>
+              <td>{{ g.platform_org_name || '-' }}</td>
               <td>{{ g.address || '-' }}</td>
               <td>
                 <span class="status-badge" :class="g.status === 'active' ? 'active' : 'suspended'">
@@ -92,8 +88,7 @@
             </tr>
           </tbody>
         </table>
-        <div v-if="groups.length === 0 && selectedPlatformUserId" class="empty-state">该平台用户下暂无社区组</div>
-        <div v-if="!selectedPlatformUserId" class="empty-state">请先选择平台用户</div>
+        <div v-if="groups.length === 0" class="empty-state">暂无社区组</div>
       </div>
     </section>
 
@@ -101,15 +96,7 @@
     <section v-if="activeTab === 'users'">
       <div class="section-header">
         <h3>所有用户</h3>
-        <div class="filter-group">
-          <select v-model="filterPlatformUserId" class="filter-select">
-            <option value="">全部平台用户</option>
-            <option v-for="p in platformUsers" :key="p.id" :value="p.id">
-              {{ p.org_name || p.username }}
-            </option>
-          </select>
-          <button class="btn-primary" @click="showCreateUser = true">创建用户</button>
-        </div>
+        <button class="btn-primary" @click="openCreateUser">创建用户</button>
       </div>
       <div class="table-wrapper">
         <table class="data-table">
@@ -119,14 +106,13 @@
               <th>用户名</th>
               <th>邮箱</th>
               <th>角色</th>
-              <th>所属平台</th>
               <th>社区组</th>
               <th>创建时间</th>
               <th>操作</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="u in filteredUsers" :key="u.id">
+            <tr v-for="u in allUsers" :key="u.id">
               <td>{{ u.id }}</td>
               <td>{{ u.username }}</td>
               <td>{{ u.email || '-' }}</td>
@@ -135,19 +121,18 @@
                   {{ roleLabel(u.role) }}
                 </span>
               </td>
-              <td>{{ u.platform_user_name || '-' }}</td>
               <td>{{ u.community_group_name || '-' }}</td>
               <td>{{ formatDate(u.created_at) }}</td>
               <td>
                 <div class="action-btns">
-                  <button v-if="u.role === 'user'" class="action-btn secondary" @click="editUser(u)">编辑</button>
+                  <button v-if="u.role === 'user' || u.role === 'platform'" class="action-btn secondary" @click="u.role === 'platform' ? editPlatformUser(u) : editUser(u)">编辑</button>
                   <button class="action-btn danger" @click="handleResetPassword(u)">重设密码</button>
                 </div>
               </td>
             </tr>
           </tbody>
         </table>
-        <div v-if="filteredUsers.length === 0" class="empty-state">暂无用户</div>
+        <div v-if="allUsers.length === 0" class="empty-state">暂无用户</div>
       </div>
     </section>
 
@@ -256,6 +241,13 @@
           <button class="modal-close" @click="showCreateGroup = false; editingGroup = null">✕</button>
         </div>
         <div class="modal-body">
+          <div class="form-item" v-if="!editingGroup">
+            <label>所属平台用户</label>
+            <select v-model="groupForm.platform_user_id" class="form-input">
+              <option value="">请选择平台用户</option>
+              <option v-for="u in platformUsers" :key="u.id" :value="u.id">{{ u.org_name || u.username }}</option>
+            </select>
+          </div>
           <div class="form-item">
             <label>社区组名称</label>
             <input v-model="groupForm.name" placeholder="输入社区组名称" class="form-input" />
@@ -281,7 +273,7 @@
       <div class="modal-content">
         <div class="modal-header">
           <h3>{{ editingUser ? '编辑用户' : '创建用户' }}</h3>
-          <button class="modal-close" @click="showCreateUser = false; editingUser = null">✕</button>
+          <button class="modal-close" @click="closeUserModal">✕</button>
         </div>
         <div class="modal-body">
           <div class="form-item" v-if="!editingUser">
@@ -290,7 +282,7 @@
           </div>
           <div class="form-item" v-if="!editingUser">
             <label>密码</label>
-            <input v-model="newUser.password" type="password" placeholder="输入密码" class="form-input" />
+            <input v-model="newUser.password" type="password" placeholder="输入密码（至少4位）" class="form-input" />
           </div>
           <div class="form-item">
             <label>邮箱（可选）</label>
@@ -298,25 +290,25 @@
           </div>
           <div class="form-item">
             <label>所属平台用户</label>
-            <select v-model="newUser.platform_user_id" @change="onPlatformChange" class="form-input">
-              <option :value="null">无</option>
+            <select v-model="selectedUserPlatformId" @change="loadUserGroups" class="form-input">
+              <option value="">无</option>
               <option v-for="p in platformUsers" :key="p.id" :value="p.id">
                 {{ p.org_name || p.username }}
               </option>
             </select>
           </div>
-          <div class="form-item" v-if="newUser.platform_user_id">
+          <div class="form-item" v-if="userGroups.length > 0">
             <label>社区组（可选）</label>
             <select v-model="newUser.community_group_id" class="form-input">
               <option :value="null">无</option>
-              <option v-for="g in availableGroups" :key="g.id" :value="g.id">
+              <option v-for="g in userGroups" :key="g.id" :value="g.id">
                 {{ g.name }}
               </option>
             </select>
           </div>
         </div>
         <div class="modal-footer">
-          <button class="btn-secondary" @click="showCreateUser = false; editingUser = null">取消</button>
+          <button class="btn-secondary" @click="closeUserModal">取消</button>
           <button class="btn-primary" @click="saveUser" :disabled="!editingUser && (!newUser.username || !newUser.password)">
             {{ editingUser ? '保存' : '创建' }}
           </button>
@@ -351,15 +343,15 @@ const groups = ref([])
 const selectedPlatformUserId = ref('')
 const showCreateGroup = ref(false)
 const editingGroup = ref(null)
-const groupForm = ref({ name: '', description: '', address: '' })
+const groupForm = ref({ name: '', description: '', address: '', platform_user_id: '' })
 
 // 用户管理
 const allUsers = ref([])
-const filterPlatformUserId = ref('')
 const showCreateUser = ref(false)
 const editingUser = ref(null)
-const newUser = ref({ username: '', password: '', email: '', platform_user_id: null, community_group_id: null })
-const availableGroups = ref([])
+const newUser = ref({ username: '', password: '', email: '', community_group_id: null })
+const selectedUserPlatformId = ref('')
+const userGroups = ref([])
 
 // 重设密码
 const showResetPassword = ref(false)
@@ -376,6 +368,7 @@ async function loadPlatformUsers() {
   try {
     const res = await listPlatformUsers()
     platformUsers.value = Array.isArray(res.data) ? res.data : res
+    await loadGroups() // 平台用户加载完后加载社区组
   } catch (e) { console.error(e) }
 }
 
@@ -438,12 +431,32 @@ async function confirmResetPassword() {
   }
 }
 
+function openCreateGroup() {
+  editingGroup.value = null
+  groupForm.value = { name: '', description: '', address: '', platform_user_id: '' }
+  showCreateGroup.value = true
+}
+
 async function loadGroups() {
-  if (!selectedPlatformUserId.value) { groups.value = []; return }
   try {
-    const res = await listGroups(selectedPlatformUserId.value)
-    groups.value = Array.isArray(res.data) ? res.data : res
-  } catch (e) { console.error(e) }
+    if (platformUsers.value.length === 0) {
+      groups.value = []
+      return
+    }
+    const promises = platformUsers.value.map(u => listGroups(u.id))
+    const results = await Promise.all(promises)
+    let allGroups = []
+    results.forEach((res, index) => {
+      let gs = Array.isArray(res.data) ? res.data : res
+      gs.forEach(g => {
+        g.platform_org_name = platformUsers.value[index].org_name || platformUsers.value[index].username
+        allGroups.push(g)
+      })
+    })
+    groups.value = allGroups
+  } catch (e) {
+    console.error('加载社区组失败', e)
+  }
 }
 
 async function saveGroup() {
@@ -452,12 +465,16 @@ async function saveGroup() {
       await updateGroup(editingGroup.value.id, groupForm.value)
       ElMessage.success('更新成功')
     } else {
-      await createGroup(selectedPlatformUserId.value, groupForm.value)
+      if (!groupForm.value.platform_user_id) {
+        ElMessage.warning('请选择所属的平台用户')
+        return
+      }
+      await createGroup(groupForm.value.platform_user_id, groupForm.value)
       ElMessage.success('创建成功')
     }
     showCreateGroup.value = false
     editingGroup.value = null
-    groupForm.value = { name: '', description: '', address: '' }
+    groupForm.value = { name: '', description: '', address: '', platform_user_id: '' }
     loadGroups()
   } catch (e) {
     ElMessage.error(e.response?.data?.error || '操作失败')
@@ -466,7 +483,7 @@ async function saveGroup() {
 
 function editGroup(g) {
   editingGroup.value = g
-  groupForm.value = { name: g.name, description: g.description || '', address: g.address || '' }
+  groupForm.value = { name: g.name, description: g.description || '', address: g.address || '', platform_user_id: g.platform_user_id || '' }
   showCreateGroup.value = true
 }
 
@@ -484,17 +501,28 @@ async function handleSuspendGroup(g) {
 }
 
 // 用户管理相关
-async function onPlatformChange() {
-  // 加载该平台用户的社区组
-  if (newUser.value.platform_user_id) {
-    try {
-      const res = await listGroups(newUser.value.platform_user_id)
-      availableGroups.value = Array.isArray(res.data) ? res.data : res
-    } catch (e) { availableGroups.value = [] }
-  } else {
-    availableGroups.value = []
-    newUser.value.community_group_id = null
-  }
+function openCreateUser() {
+  editingUser.value = null
+  newUser.value = { username: '', password: '', email: '', community_group_id: null }
+  selectedUserPlatformId.value = ''
+  userGroups.value = []
+  showCreateUser.value = true
+}
+
+function closeUserModal() {
+  showCreateUser.value = false
+  editingUser.value = null
+  selectedUserPlatformId.value = ''
+  userGroups.value = []
+}
+
+async function loadUserGroups() {
+  newUser.value.community_group_id = null
+  if (!selectedUserPlatformId.value) { userGroups.value = []; return }
+  try {
+    const res = await listGroups(selectedUserPlatformId.value)
+    userGroups.value = Array.isArray(res.data) ? res.data : res
+  } catch (e) { userGroups.value = [] }
 }
 
 function editUser(u) {
@@ -502,14 +530,10 @@ function editUser(u) {
   newUser.value = {
     username: u.username,
     email: u.email || '',
-    platform_user_id: u.platform_user_id,
     community_group_id: u.community_group_id,
   }
-  if (u.platform_user_id) {
-    listGroups(u.platform_user_id).then(res => {
-      availableGroups.value = Array.isArray(res.data) ? res.data : res
-    })
-  }
+  selectedUserPlatformId.value = ''
+  userGroups.value = []
   showCreateUser.value = true
 }
 
@@ -518,7 +542,6 @@ async function saveUser() {
     if (editingUser.value) {
       await adminUpdateUser(editingUser.value.id, {
         email: newUser.value.email,
-        platform_user_id: newUser.value.platform_user_id,
         community_group_id: newUser.value.community_group_id,
       })
       ElMessage.success('更新成功')
@@ -526,10 +549,7 @@ async function saveUser() {
       await adminCreateUser(newUser.value)
       ElMessage.success('用户创建成功')
     }
-    showCreateUser.value = false
-    editingUser.value = null
-    newUser.value = { username: '', password: '', email: '', platform_user_id: null, community_group_id: null }
-    availableGroups.value = []
+    closeUserModal()
     loadAllUsers()
   } catch (e) {
     ElMessage.error(e.response?.data?.error || '操作失败')
