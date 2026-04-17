@@ -23,7 +23,9 @@ class User(Base):
     org_description = Column(Text, nullable=True)
     org_contact_name = Column(String(64), nullable=True)
     org_contact_phone = Column(String(20), nullable=True)
-    # 普通用户社区组绑定
+    # 普通用户直接关联平台用户
+    platform_user_id = Column(Integer, nullable=True, index=True)
+    # 普通用户社区组绑定（保留可选）
     community_group_id = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.now)
 
@@ -52,6 +54,7 @@ def init_db(app):
     _migrate_events_table(engine)
     _migrate_users_role(engine)
     _migrate_users_org(engine)
+    _migrate_users_platform_user_id(engine)
 
     # community_groups 迁移（延迟导入避免循环依赖）
     try:
@@ -165,5 +168,44 @@ def _migrate_users_org(engine):
                     org_contact_phone = (SELECT contact_phone FROM platform_orgs WHERE platform_orgs.id = users.platform_org_id)
                 WHERE users.role = 'platform' AND users.platform_org_id IS NOT NULL
                 AND users.org_name IS NULL
+            """))
+            conn.commit()
+
+
+def _migrate_users_platform_user_id(engine):
+    """为 users 表添加 platform_user_id 字段，并从现有关系回填数据"""
+    from sqlalchemy import inspect, text
+    insp = inspect(engine)
+    if 'users' not in insp.get_table_names():
+        return
+
+    existing = {col['name'] for col in insp.get_columns('users')}
+
+    with engine.connect() as conn:
+        # 1. 添加 platform_user_id 列
+        if 'platform_user_id' not in existing:
+            conn.execute(text('ALTER TABLE users ADD COLUMN platform_user_id INTEGER'))
+            conn.commit()
+
+        # 2. 创建索引（如果不存在）
+        try:
+            conn.execute(text('CREATE INDEX IF NOT EXISTS ix_users_platform_user_id ON users(platform_user_id)'))
+            conn.commit()
+        except Exception:
+            pass
+
+        # 3. 从现有关系回填数据
+        # 通过 community_group_id -> community_groups.platform_user_id 推导
+        tables = insp.get_table_names()
+        if 'community_groups' in tables:
+            conn.execute(text("""
+                UPDATE users SET platform_user_id = (
+                    SELECT cg.platform_user_id
+                    FROM community_groups cg
+                    WHERE cg.id = users.community_group_id
+                )
+                WHERE users.role = 'user'
+                AND users.community_group_id IS NOT NULL
+                AND users.platform_user_id IS NULL
             """))
             conn.commit()

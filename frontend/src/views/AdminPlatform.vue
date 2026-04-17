@@ -101,6 +101,15 @@
     <section v-if="activeTab === 'users'">
       <div class="section-header">
         <h3>所有用户</h3>
+        <div class="filter-group">
+          <select v-model="filterPlatformUserId" class="filter-select">
+            <option value="">全部平台用户</option>
+            <option v-for="p in platformUsers" :key="p.id" :value="p.id">
+              {{ p.org_name || p.username }}
+            </option>
+          </select>
+          <button class="btn-primary" @click="showCreateUser = true">创建用户</button>
+        </div>
       </div>
       <div class="table-wrapper">
         <table class="data-table">
@@ -110,12 +119,14 @@
               <th>用户名</th>
               <th>邮箱</th>
               <th>角色</th>
+              <th>所属平台</th>
+              <th>社区组</th>
               <th>创建时间</th>
               <th>操作</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="u in allUsers" :key="u.id">
+            <tr v-for="u in filteredUsers" :key="u.id">
               <td>{{ u.id }}</td>
               <td>{{ u.username }}</td>
               <td>{{ u.email || '-' }}</td>
@@ -124,16 +135,19 @@
                   {{ roleLabel(u.role) }}
                 </span>
               </td>
+              <td>{{ u.platform_user_name || '-' }}</td>
+              <td>{{ u.community_group_name || '-' }}</td>
               <td>{{ formatDate(u.created_at) }}</td>
               <td>
                 <div class="action-btns">
+                  <button v-if="u.role === 'user'" class="action-btn secondary" @click="editUser(u)">编辑</button>
                   <button class="action-btn danger" @click="handleResetPassword(u)">重设密码</button>
                 </div>
               </td>
             </tr>
           </tbody>
         </table>
-        <div v-if="allUsers.length === 0" class="empty-state">暂无用户</div>
+        <div v-if="filteredUsers.length === 0" class="empty-state">暂无用户</div>
       </div>
     </section>
 
@@ -261,14 +275,63 @@
         </div>
       </div>
     </div>
+
+    <!-- 创建用户弹窗 -->
+    <div v-if="showCreateUser" class="modal-overlay" @click.self="showCreateUser = false">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>{{ editingUser ? '编辑用户' : '创建用户' }}</h3>
+          <button class="modal-close" @click="showCreateUser = false; editingUser = null">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-item" v-if="!editingUser">
+            <label>用户名</label>
+            <input v-model="newUser.username" placeholder="输入用户名" class="form-input" />
+          </div>
+          <div class="form-item" v-if="!editingUser">
+            <label>密码</label>
+            <input v-model="newUser.password" type="password" placeholder="输入密码" class="form-input" />
+          </div>
+          <div class="form-item">
+            <label>邮箱（可选）</label>
+            <input v-model="newUser.email" placeholder="输入邮箱" class="form-input" />
+          </div>
+          <div class="form-item">
+            <label>所属平台用户</label>
+            <select v-model="newUser.platform_user_id" @change="onPlatformChange" class="form-input">
+              <option :value="null">无</option>
+              <option v-for="p in platformUsers" :key="p.id" :value="p.id">
+                {{ p.org_name || p.username }}
+              </option>
+            </select>
+          </div>
+          <div class="form-item" v-if="newUser.platform_user_id">
+            <label>社区组（可选）</label>
+            <select v-model="newUser.community_group_id" class="form-input">
+              <option :value="null">无</option>
+              <option v-for="g in availableGroups" :key="g.id" :value="g.id">
+                {{ g.name }}
+              </option>
+            </select>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn-secondary" @click="showCreateUser = false; editingUser = null">取消</button>
+          <button class="btn-primary" @click="saveUser" :disabled="!editingUser && (!newUser.username || !newUser.password)">
+            {{ editingUser ? '保存' : '创建' }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import {
   listPlatformUsers, updatePlatformUser, listAllUsers, adminResetPassword,
   createGroup, listGroups, updateGroup, suspendGroup,
+  adminCreateUser, adminUpdateUser,
 } from '@/api/platform'
 import { createPlatformUser as createPlatformUserApi } from '@/api/auth'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -292,11 +355,22 @@ const groupForm = ref({ name: '', description: '', address: '' })
 
 // 用户管理
 const allUsers = ref([])
+const filterPlatformUserId = ref('')
+const showCreateUser = ref(false)
+const editingUser = ref(null)
+const newUser = ref({ username: '', password: '', email: '', platform_user_id: null, community_group_id: null })
+const availableGroups = ref([])
 
 // 重设密码
 const showResetPassword = ref(false)
 const resetTarget = ref(null)
 const newPassword = ref('')
+
+// 过滤后的用户列表
+const filteredUsers = computed(() => {
+  if (!filterPlatformUserId.value) return allUsers.value
+  return allUsers.value.filter(u => u.platform_user_id === filterPlatformUserId.value)
+})
 
 async function loadPlatformUsers() {
   try {
@@ -407,6 +481,59 @@ async function handleSuspendGroup(g) {
     }
     loadGroups()
   } catch (e) { ElMessage.error('操作失败') }
+}
+
+// 用户管理相关
+async function onPlatformChange() {
+  // 加载该平台用户的社区组
+  if (newUser.value.platform_user_id) {
+    try {
+      const res = await listGroups(newUser.value.platform_user_id)
+      availableGroups.value = Array.isArray(res.data) ? res.data : res
+    } catch (e) { availableGroups.value = [] }
+  } else {
+    availableGroups.value = []
+    newUser.value.community_group_id = null
+  }
+}
+
+function editUser(u) {
+  editingUser.value = u
+  newUser.value = {
+    username: u.username,
+    email: u.email || '',
+    platform_user_id: u.platform_user_id,
+    community_group_id: u.community_group_id,
+  }
+  if (u.platform_user_id) {
+    listGroups(u.platform_user_id).then(res => {
+      availableGroups.value = Array.isArray(res.data) ? res.data : res
+    })
+  }
+  showCreateUser.value = true
+}
+
+async function saveUser() {
+  try {
+    if (editingUser.value) {
+      await adminUpdateUser(editingUser.value.id, {
+        email: newUser.value.email,
+        platform_user_id: newUser.value.platform_user_id,
+        community_group_id: newUser.value.community_group_id,
+      })
+      ElMessage.success('更新成功')
+    } else {
+      await adminCreateUser(newUser.value)
+      ElMessage.success('用户创建成功')
+    }
+    showCreateUser.value = false
+    editingUser.value = null
+    newUser.value = { username: '', password: '', email: '', platform_user_id: null, community_group_id: null }
+    availableGroups.value = []
+    loadAllUsers()
+  } catch (e) {
+    ElMessage.error(e.response?.data?.error || '操作失败')
+  }
 }
 
 function roleLabel(role) {

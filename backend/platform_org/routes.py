@@ -174,16 +174,29 @@ async def list_my_communities():
 # ── 平台用户：聚合统计 ──────────────────────────
 
 def _get_platform_user_ids(db, platform_user_id: int):
-    """获取平台用户下所有社区组的用户ID列表"""
+    """获取平台用户下所有用户ID列表（支持直接关联和社区组间接关联）"""
+    # 方式1：通过 platform_user_id 直接关联
+    direct_users = [u.id for u in db.query(User).filter(
+        User.platform_user_id == platform_user_id,
+        User.role == 'user'
+    ).all()]
+
+    # 方式2：通过社区组间接关联（兼容旧数据）
     group_ids = [g.id for g in db.query(CommunityGroup).filter(
         CommunityGroup.platform_user_id == platform_user_id,
         CommunityGroup.status == 'active',
     ).all()]
-    if not group_ids:
-        return []
-    return [u.id for u in db.query(User).filter(
-        User.community_group_id.in_(group_ids),
-    ).all()]
+
+    indirect_users = []
+    if group_ids:
+        indirect_users = [u.id for u in db.query(User).filter(
+            User.community_group_id.in_(group_ids),
+            User.role == 'user',
+            User.platform_user_id == None,  # 只取未直接关联的，避免重复
+        ).all()]
+
+    # 合并去重
+    return list(set(direct_users + indirect_users))
 
 
 @platform_bp.route('/api/platform/stats', methods=['GET'])
@@ -379,3 +392,143 @@ async def set_user_community():
     user.community_group_id = group_id
     db.commit()
     return jsonify({'message': '社区组已更新', 'community': group.to_dict()})
+
+
+# ── 平台用户：下属用户管理 ──────────────────────────
+
+@platform_bp.route('/api/platform/my-users', methods=['GET'])
+@token_required
+@role_required('platform')
+async def list_my_users():
+    """平台用户获取下属用户列表"""
+    platform_user_id = request.current_user['user_id']
+    db = next(get_db())
+
+    users = db.query(User).filter_by(
+        platform_user_id=platform_user_id,
+        role='user'
+    ).order_by(User.created_at.desc()).all()
+
+    result = []
+    for u in users:
+        group_name = None
+        if u.community_group_id:
+            group = db.query(CommunityGroup).filter_by(id=u.community_group_id).first()
+            group_name = group.name if group else None
+
+        result.append({
+            'id': u.id,
+            'username': u.username,
+            'email': u.email,
+            'community_group_id': u.community_group_id,
+            'community_group_name': group_name,
+            'created_at': u.created_at.isoformat() if u.created_at else None,
+        })
+
+    return jsonify(result)
+
+
+@platform_bp.route('/api/platform/my-users', methods=['POST'])
+@token_required
+@role_required('platform')
+async def create_my_user():
+    """平台用户创建下属普通用户"""
+    platform_user_id = request.current_user['user_id']
+    data = await request.get_json()
+    db = next(get_db())
+
+    # 验证用户名唯一
+    existing = db.query(User).filter_by(username=data['username']).first()
+    if existing:
+        return jsonify({'error': '用户名已存在'}), 400
+
+    # 验证社区组属于自己
+    community_group_id = data.get('community_group_id')
+    if community_group_id:
+        group = db.query(CommunityGroup).filter_by(
+            id=community_group_id,
+            platform_user_id=platform_user_id
+        ).first()
+        if not group:
+            return jsonify({'error': '社区组不存在或不属于您'}), 400
+
+    user = User(
+        username=data['username'],
+        email=data.get('email'),
+        role='user',
+        platform_user_id=platform_user_id,  # 自动绑定到自己
+        community_group_id=community_group_id,
+    )
+    user.set_password(data['password'])
+
+    db.add(user)
+    db.commit()
+
+    return jsonify({
+        'message': '用户创建成功',
+        'user_id': user.id,
+        'username': user.username,
+    }), 201
+
+
+@platform_bp.route('/api/platform/my-users/<int:user_id>', methods=['PUT'])
+@token_required
+@role_required('platform')
+async def update_my_user(user_id: int):
+    """平台用户更新下属用户"""
+    platform_user_id = request.current_user['user_id']
+    data = await request.get_json()
+    db = next(get_db())
+
+    # 验证用户属于自己
+    user = db.query(User).filter_by(
+        id=user_id,
+        platform_user_id=platform_user_id,
+        role='user'
+    ).first()
+    if not user:
+        return jsonify({'error': '用户不存在或不属于您'}), 404
+
+    # 更新字段
+    if 'email' in data:
+        user.email = data['email']
+
+    if 'community_group_id' in data:
+        community_group_id = data['community_group_id']
+        if community_group_id:
+            group = db.query(CommunityGroup).filter_by(
+                id=community_group_id,
+                platform_user_id=platform_user_id
+            ).first()
+            if not group:
+                return jsonify({'error': '社区组不存在或不属于您'}), 400
+        user.community_group_id = community_group_id
+
+    db.commit()
+    return jsonify({'message': '更新成功'})
+
+
+@platform_bp.route('/api/platform/my-users/<int:user_id>/reset-password', methods=['POST'])
+@token_required
+@role_required('platform')
+async def reset_my_user_password(user_id: int):
+    """平台用户重置下属用户密码"""
+    platform_user_id = request.current_user['user_id']
+    data = await request.get_json()
+    new_password = data.get('new_password')
+
+    if not new_password or len(new_password) < 4:
+        return jsonify({'error': '密码长度至少4位'}), 400
+
+    db = next(get_db())
+    user = db.query(User).filter_by(
+        id=user_id,
+        platform_user_id=platform_user_id,
+        role='user'
+    ).first()
+    if not user:
+        return jsonify({'error': '用户不存在或不属于您'}), 404
+
+    user.set_password(new_password)
+    db.commit()
+    return jsonify({'message': f'用户 {user.username} 密码已重置'})

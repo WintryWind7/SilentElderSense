@@ -106,17 +106,38 @@ async def list_users():
     """管理员获取用户列表"""
     db = next(get_db())
     users = db.query(User).order_by(User.created_at.desc()).all()
-    return jsonify([{
-        'id': u.id,
-        'username': u.username,
-        'email': u.email,
-        'role': u.role,
-        'org_name': u.org_name,
-        'org_contact_name': u.org_contact_name,
-        'org_contact_phone': u.org_contact_phone,
-        'community_group_id': u.community_group_id,
-        'created_at': u.created_at.isoformat() if u.created_at else None,
-    } for u in users])
+
+    result = []
+    for u in users:
+        # 获取平台用户名称
+        platform_user_name = None
+        if u.platform_user_id:
+            p = db.query(User).filter_by(id=u.platform_user_id).first()
+            platform_user_name = p.org_name or p.username if p else None
+
+        # 获取社区组名称
+        community_group_name = None
+        if u.community_group_id:
+            from platform_org.models import CommunityGroup
+            g = db.query(CommunityGroup).filter_by(id=u.community_group_id).first()
+            community_group_name = g.name if g else None
+
+        result.append({
+            'id': u.id,
+            'username': u.username,
+            'email': u.email,
+            'role': u.role,
+            'platform_user_id': u.platform_user_id,
+            'platform_user_name': platform_user_name,
+            'community_group_id': u.community_group_id,
+            'community_group_name': community_group_name,
+            'org_name': u.org_name,
+            'org_contact_name': u.org_contact_name,
+            'org_contact_phone': u.org_contact_phone,
+            'created_at': u.created_at.isoformat() if u.created_at else None,
+        })
+
+    return jsonify(result)
 
 
 @auth_bp.route('/api/admin/reset-password', methods=['POST'])
@@ -142,3 +163,88 @@ async def reset_password():
     user.set_password(new_password)
     db.commit()
     return jsonify({'message': f'用户 {user.username} 密码已重置'})
+
+
+# ── 管理员：普通用户管理 ──────────────────────────
+
+@auth_bp.route('/api/admin/users', methods=['POST'])
+@token_required
+@admin_required
+async def admin_create_user():
+    """管理员创建普通用户，可指定 platform_user_id"""
+    data = await request.get_json()
+    db = next(get_db())
+
+    # 验证用户名唯一
+    existing = db.query(User).filter_by(username=data['username']).first()
+    if existing:
+        return jsonify({'error': '用户名已存在'}), 400
+
+    # 验证 platform_user_id 有效
+    platform_user_id = data.get('platform_user_id')
+    if platform_user_id:
+        platform_user = db.query(User).filter_by(id=platform_user_id, role='platform').first()
+        if not platform_user:
+            return jsonify({'error': '平台用户不存在'}), 400
+
+    # 验证 community_group_id 属于该平台用户
+    community_group_id = data.get('community_group_id')
+    if community_group_id and platform_user_id:
+        from platform_org.models import CommunityGroup
+        group = db.query(CommunityGroup).filter_by(
+            id=community_group_id,
+            platform_user_id=platform_user_id
+        ).first()
+        if not group:
+            return jsonify({'error': '社区组不属于该平台用户'}), 400
+
+    user = User(
+        username=data['username'],
+        email=data.get('email'),
+        role='user',
+        platform_user_id=platform_user_id,
+        community_group_id=community_group_id,
+    )
+    user.set_password(data['password'])
+
+    db.add(user)
+    db.commit()
+
+    return jsonify({
+        'message': '用户创建成功',
+        'user_id': user.id,
+        'username': user.username,
+    }), 201
+
+
+@auth_bp.route('/api/admin/users/<int:user_id>', methods=['PUT'])
+@token_required
+@admin_required
+async def admin_update_user(user_id: int):
+    """管理员更新用户信息"""
+    data = await request.get_json()
+    db = next(get_db())
+
+    user = db.query(User).filter_by(id=user_id).first()
+    if not user:
+        return jsonify({'error': '用户不存在'}), 404
+
+    # 更新基本信息
+    if 'email' in data:
+        user.email = data['email']
+
+    # 更新关联关系（仅普通用户）
+    if user.role == 'user':
+        if 'platform_user_id' in data:
+            platform_user_id = data['platform_user_id']
+            if platform_user_id:
+                platform_user = db.query(User).filter_by(id=platform_user_id, role='platform').first()
+                if not platform_user:
+                    return jsonify({'error': '平台用户不存在'}), 400
+            user.platform_user_id = platform_user_id
+
+        if 'community_group_id' in data:
+            user.community_group_id = data['community_group_id']
+
+    db.commit()
+    return jsonify({'message': '更新成功'})
