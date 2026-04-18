@@ -150,8 +150,7 @@ export const useEventsStore = defineStore('events', () => {
     stillness: 0,
     nightActivity: 0,
     handled: 0,
-    pending: 0,
-    accuracy: 94.5
+    pending: 0
   })
 
   // 低频阈值隐藏辅助函数
@@ -175,8 +174,7 @@ export const useEventsStore = defineStore('events', () => {
       stillness: d.by_type?.STILLNESS ?? stats.by_type?.STILLNESS ?? 0,
       nightActivity: d.by_type?.NIGHT_ABNORMAL ?? stats.by_type?.NIGHT_ABNORMAL ?? 0,
       handled: maskLowFreq(handledNum),
-      pending: d.by_status?.pending ?? stats.by_status?.pending ?? 0,
-      accuracy: 94.5
+      pending: d.by_status?.pending ?? stats.by_status?.pending ?? 0
     }
   }
 

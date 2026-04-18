@@ -238,7 +238,12 @@ const getRoleName = (role) => {
 }
 
 const showNotifications = () => {
-  // TODO: 显示通知面板
+  const pending = pendingEvents.value
+  if (pending > 0) {
+    alert(`当前有 ${pending} 条待处理事件`)
+  } else {
+    alert('暂无待处理事件')
+  }
 }
 
 const goToDashboard = () => {

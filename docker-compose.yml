@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: silent-elder-sense-backend:latest
+    container_name: ses_backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - sqlite_data:/app/data
+      - ./backend/secure_core/models:/app/secure_core/models
+    environment:
+      - WORKERS=4
+      - PORT=8000
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: silent-elder-sense-frontend:latest
+    container_name: ses_frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  sqlite_data:
