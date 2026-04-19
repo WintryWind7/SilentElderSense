@@ -142,6 +142,8 @@ import { createSession, closeSession, getCameraDevices, stopStream } from '@/api
 import { getEvents } from '@/api/events'
 import { getRiskTagType, getRiskLabel, getEventTypeLabel } from '@/utils/risk'
 
+const wsBaseUrl = import.meta.env.VITE_WS_BASE_URL
+
 // 摄像头
 const cameraDevices = ref([])
 const selectedCameraId = ref('')
@@ -251,7 +253,7 @@ const startCameraDetection = async () => {
     videoId.value = response.video_id
 
     // 连接 WebSocket
-    ws = new WebSocket(`ws://localhost:8000/ws/detect/${videoId.value}`)
+    ws = new WebSocket(`${wsBaseUrl}/ws/detect/${videoId.value}`)
 
     ws.onopen = () => {
       isConnected.value = true

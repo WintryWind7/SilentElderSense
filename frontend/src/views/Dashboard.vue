@@ -1,14 +1,5 @@
 <template>
   <div class="dashboard-page">
-    <!-- 隐私保护提示 -->
-    <div class="privacy-notice">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-        <path d="M12 2L2 7l10 5 10-5-10-5z"/>
-        <path d="M2 17l10 5 10-5"/>
-        <path d="M2 12l10 5 10-5"/>
-      </svg>
-      <span>统计结果已采用差分隐私技术处理（ε=0.8），数值与原始数据可能存在轻微差异，但不影响总体趋势判断。</span>
-    </div>
     <!-- 统计卡片 -->
     <section class="stats-section">
       <div class="stats-grid">

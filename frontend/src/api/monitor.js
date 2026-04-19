@@ -1,5 +1,7 @@
 import request from './index'
 
+const wsBaseUrl = import.meta.env.VITE_WS_BASE_URL
+
 // 创建检测会话
 export function createSession() {
   return request({
@@ -32,12 +34,12 @@ export function uploadVideo(file) {
 
 // WebSocket 实时检测（摄像头）
 export function createDetectWebSocket(videoId) {
-  return new WebSocket(`ws://localhost:8000/ws/detect/${videoId}`)
+  return new WebSocket(`${wsBaseUrl}/ws/detect/${videoId}`)
 }
 
 // WebSocket 视频处理
 export function createVideoProcessWebSocket(videoId) {
-  return new WebSocket(`ws://localhost:8000/ws/video/${videoId}`)
+  return new WebSocket(`${wsBaseUrl}/ws/video/${videoId}`)
 }
 
 // ========== 摄像头相关 API ==========

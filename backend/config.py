@@ -13,6 +13,9 @@ class Config:
     DP_DEFAULT_EPSILON = 0.8  # 默认 epsilon
     DP_DAILY_LIMIT = 3.0  # 每用户每日隐私预算上限
 
+    # CORS 允许的前端来源
+    CORS_ORIGINS = os.environ.get('CORS_ORIGINS', 'http://localhost:3000,http://127.0.0.1:3000').split(',')
+
 
 class DevelopmentConfig(Config):
     """开发环境配置 - 数据加噪但不限制预算"""

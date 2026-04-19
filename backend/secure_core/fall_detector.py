@@ -40,10 +40,11 @@ class FallDetector:
     # 类别名称映射
     CLASS_NAMES = {0: 'normal', 1: 'fallen'}
 
-    # 人脸模糊配置
+    # 人脸模糊默认配置（可通过 update_blur_config 动态修改）
     ENABLE_FACE_BLUR = True
     FACE_BLUR_STRENGTH = 51
     FACE_BLUR_EXPAND_RATIO = 0.5
+    FACE_DETECTION_CONFIDENCE = 0.5
 
     # 模型文件路径（相对于 secure_core/ 目录）
     _PKG_ROOT = Path(__file__).parent
@@ -74,6 +75,11 @@ class FallDetector:
         self.input_name = self.session.get_inputs()[0].name
         self.img_size = self.session.get_inputs()[0].shape[2]
 
+        # 实例级模糊配置（优先于类常量，必须在 _init_mediapipe 之前）
+        self._face_blur_strength = self.FACE_BLUR_STRENGTH
+        self._face_blur_expand_ratio = self.FACE_BLUR_EXPAND_RATIO
+        self._face_detection_confidence = self.FACE_DETECTION_CONFIDENCE
+
         # MediaPipe 人脸检测器 (全距模型)
         self._init_mediapipe()
 
@@ -82,6 +88,21 @@ class FallDetector:
 
         # 保存原始图像尺寸
         self.orig_shape = None
+
+    def update_blur_config(self, config: dict):
+        """更新人脸模糊参数（由 SecureCore 在会话创建时调用）"""
+        if 'FACE_BLUR_STRENGTH' in config:
+            val = config['FACE_BLUR_STRENGTH']
+            # GaussianBlur 核大小必须为正奇数
+            if val % 2 == 0:
+                val += 1
+            self._face_blur_strength = max(1, val)
+        if 'FACE_BLUR_EXPAND_RATIO' in config:
+            self._face_blur_expand_ratio = float(config['FACE_BLUR_EXPAND_RATIO'])
+        if 'FACE_DETECTION_CONFIDENCE' in config:
+            self._face_detection_confidence = float(config['FACE_DETECTION_CONFIDENCE'])
+            # 重建 MediaPipe 检测器以应用新置信度
+            self._init_mediapipe()
 
     def _init_mediapipe(self):
         """初始化MediaPipe人脸检测"""
@@ -101,7 +122,7 @@ class FallDetector:
         self.mp_options = FaceDetectorOptions(
             base_options=BaseOptions(model_asset_path=str(model_path)),
             running_mode=VisionRunningMode.IMAGE,
-            min_detection_confidence=0.5
+            min_detection_confidence=self._face_detection_confidence
         )
         self.mp_detector = FaceDetector.create_from_options(self.mp_options)
 
@@ -375,7 +396,7 @@ class FallDetector:
                         frame_w: int, frame_h: int):
         """对指定区域进行模糊"""
         # 扩大模糊区域
-        expand = self.FACE_BLUR_EXPAND_RATIO
+        expand = self._face_blur_expand_ratio
         x1, y1, x2, y2 = box
         cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
         fw, fh = x2 - x1, y2 - y1
@@ -390,7 +411,7 @@ class FallDetector:
 
         if x2 - x1 > 5 and y2 - y1 > 5:
             region = frame[y1:y2, x1:x2]
-            blurred = cv2.GaussianBlur(region, (self.FACE_BLUR_STRENGTH, self.FACE_BLUR_STRENGTH), 0)
+            blurred = cv2.GaussianBlur(region, (self._face_blur_strength, self._face_blur_strength), 0)
             frame[y1:y2, x1:x2] = blurred
 
         return frame

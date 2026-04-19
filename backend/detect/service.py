@@ -56,7 +56,7 @@ class DetectionConfigService:
 
     def get_runtime_config(self, user_id: int) -> dict:
         """
-        获取用户的运行时配置字典（供 risk_engine 使用）
+        获取用户的运行时配置字典（供 risk_engine / secure_core 使用）
         """
         config = self.get_config(user_id)
         return {
@@ -67,7 +67,11 @@ class DetectionConfigService:
             'STILLNESS_ESCALATE_SECS': config.stillness_escalate_secs,
             'NIGHT_START_HOUR': config.night_start_hour,
             'NIGHT_END_HOUR': config.night_end_hour,
-            'LOST_GRACE_SECS': config.lost_grace_secs
+            'LOST_GRACE_SECS': config.lost_grace_secs,
+            # 人脸模糊参数
+            'FACE_BLUR_STRENGTH': config.face_blur_strength,
+            'FACE_BLUR_EXPAND_RATIO': config.face_blur_expand_ratio,
+            'FACE_DETECTION_CONFIDENCE': config.face_detection_confidence,
         }
 
 

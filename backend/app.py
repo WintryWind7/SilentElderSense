@@ -39,11 +39,12 @@ app.register_blueprint(alerts_bp)
 app.register_blueprint(platform_bp)
 
 # CORS 中间件（支持预检请求和携带认证的请求）
+_cors_origins = app.config['CORS_ORIGINS']
+
 @app.after_request
 async def after_request(response):
     origin = request.headers.get('Origin')
-    # 允许的来源
-    if origin in ['http://localhost:3000', 'http://127.0.0.1:3000']:
+    if origin in _cors_origins:
         response.headers.add('Access-Control-Allow-Origin', origin)
         response.headers.add('Access-Control-Allow-Credentials', 'true')
         response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
@@ -55,7 +56,7 @@ async def after_request(response):
 @app.route('/<path:path>', methods=['OPTIONS'])
 async def handle_options(path=''):
     origin = request.headers.get('Origin')
-    if origin in ['http://localhost:3000', 'http://127.0.0.1:3000']:
+    if origin in _cors_origins:
         return '', 204, {
             'Access-Control-Allow-Origin': origin,
             'Access-Control-Allow-Credentials': 'true',

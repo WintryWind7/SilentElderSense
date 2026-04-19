@@ -157,6 +157,8 @@ import { uploadVideo, createVideoProcessWebSocket } from '@/api/monitor'
 import { getRiskTagType, getRiskLabel } from '@/utils/risk'
 import { useAuthStore } from '@/stores/auth'
 
+const wsBaseUrl = import.meta.env.VITE_WS_BASE_URL
+
 const authStore = useAuthStore()
 
 // 状态
@@ -244,9 +246,9 @@ const connectWebSocket = () => {
       return
     }
     const userId = authStore.user?.id
-    ws = new WebSocket(`ws://localhost:8000/ws/video/${videoId.value}?persist=true&user_id=${userId}`)
+    ws = new WebSocket(`${wsBaseUrl}/ws/video/${videoId.value}?persist=true&user_id=${userId}`)
   } else {
-    ws = new WebSocket(`ws://localhost:8000/ws/video/${videoId.value}`)
+    ws = new WebSocket(`${wsBaseUrl}/ws/video/${videoId.value}`)
   }
 
   ws.onopen = () => console.log('[WS] 连接已建立')

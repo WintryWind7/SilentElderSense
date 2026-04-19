@@ -439,6 +439,8 @@ import { getEvents, getEventStats, getHourlyTrend } from '@/api/events'
 import { getSystemStatus } from '@/api/system'
 import { getCameraDevices, createSession, closeSession, stopStream, uploadVideo } from '@/api/monitor'
 
+const wsBaseUrl = import.meta.env.VITE_WS_BASE_URL
+
 const router = useRouter()
 
 // 时间显示
@@ -680,7 +682,7 @@ const startVideoProcessing = async () => {
 }
 
 const connectVideoWs = () => {
-  videoWs = new WebSocket(`ws://localhost:8000/ws/video/${videoUploadId}`)
+  videoWs = new WebSocket(`${wsBaseUrl}/ws/video/${videoUploadId}`)
 
   videoWs.onmessage = (event) => {
     try {
@@ -790,7 +792,7 @@ const startCameraDetection = async () => {
     cameraVideoId = response.video_id
 
     // 连接 WebSocket
-    cameraWs = new WebSocket(`ws://localhost:8000/ws/detect/${cameraVideoId}`)
+    cameraWs = new WebSocket(`${wsBaseUrl}/ws/detect/${cameraVideoId}`)
 
     cameraWs.onopen = () => {
       isCameraConnected.value = true

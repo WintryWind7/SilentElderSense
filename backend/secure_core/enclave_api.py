@@ -120,6 +120,15 @@ class SecureCore:
         session_id = self._detector.create_session()
         self._risk_engine.create_session(session_id, is_live=is_live, user_id=user_id)
 
+        # 将用户的模糊参数下发给 FallDetector
+        if user_id:
+            try:
+                session_state = self._risk_engine._sessions.get(session_id)
+                if session_state and session_state.config:
+                    self._detector.update_blur_config(session_state.config)
+            except Exception as e:
+                logger.warning(f"下发模糊参数失败，使用默认配置: {e}")
+
         return {
             "session_id": session_id,
             "core_hash": self._core_hash,
