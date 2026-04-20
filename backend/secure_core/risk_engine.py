@@ -29,18 +29,18 @@ LOG_DIR = os.path.join(os.path.dirname(__file__), '..', 'data', 'log')
 os.makedirs(LOG_DIR, exist_ok=True)
 
 logger = logging.getLogger('risk_engine')
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.WARNING)
 logger.handlers.clear()  # 避免重复添加
 
-# 文件处理器
-log_file = os.path.join(LOG_DIR, 'risk_engine.log')
-file_handler = logging.FileHandler(log_file, encoding='utf-8')
-file_handler.setLevel(logging.DEBUG)
-file_handler.setFormatter(logging.Formatter(
-    '%(asctime)s | %(levelname)s | %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-))
-logger.addHandler(file_handler)
+# # 文件处理器（逐帧 DEBUG 日志已禁用，避免 I/O 瓶颈）
+# log_file = os.path.join(LOG_DIR, 'risk_engine.log')
+# file_handler = logging.FileHandler(log_file, encoding='utf-8')
+# file_handler.setLevel(logging.DEBUG)
+# file_handler.setFormatter(logging.Formatter(
+#     '%(asctime)s | %(levelname)s | %(message)s',
+#     datefmt='%Y-%m-%d %H:%M:%S'
+# ))
+# logger.addHandler(file_handler)
 
 
 # ==================== 风险常量 ====================

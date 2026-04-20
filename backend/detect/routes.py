@@ -537,33 +537,32 @@ def _persist_event_change(db, ch, video_id: str, user_id: int,
                           snapshot_frame=None):
     """将事件变更写入数据库"""
     if ch.change_type == 'started':
-        # 匿名化 person_id
-        from secure_core.event_builder import EventBuilder
-        anon_person_id = EventBuilder.anonymize_id(ch.person_id)
-
-        # 保存模糊帧快照
-        snapshot_path = None
-        if snapshot_frame is not None:
-            filename = f"evt_{video_id}_{ch.person_id}_{int(ch.start_ts)}.jpg"
-            filepath = os.path.join(SNAPSHOT_DIR, filename)
-            cv2.imwrite(filepath, snapshot_frame)
-            snapshot_path = filepath
+        # # 快照写入已禁用（避免 cv2.imwrite 阻塞 async event loop）
+        # from secure_core.event_builder import EventBuilder
+        # anon_person_id = EventBuilder.anonymize_id(ch.person_id)
+        #
+        # snapshot_path = None
+        # if snapshot_frame is not None:
+        #     filename = f"evt_{video_id}_{ch.person_id}_{int(ch.start_ts)}.jpg"
+        #     filepath = os.path.join(SNAPSHOT_DIR, filename)
+        #     cv2.imwrite(filepath, snapshot_frame)
+        #     snapshot_path = filepath
 
         # 事件开始：使用 EventChange 中的时间
         event = Event(
             user_id=user_id,
             video_id=video_id,
             person_id=ch.person_id,
-            anon_person_id=anon_person_id,
+            # anon_person_id=anon_person_id,
             event_type=ch.event_type,
             risk_level=ch.risk_level,
             start_time=datetime.fromtimestamp(ch.start_ts),
             end_time=datetime.fromtimestamp(ch.start_ts),
             frame_count=ch.frame_count,
-            snapshot_path=snapshot_path,
-            feature_summary=json.dumps(ch.feature_summary, ensure_ascii=False) if ch.feature_summary else None,
-            core_hash=core_hash,
-            model_version=model_version,
+            # snapshot_path=snapshot_path,
+            # feature_summary=json.dumps(ch.feature_summary, ensure_ascii=False) if ch.feature_summary else None,
+            # core_hash=core_hash,
+            # model_version=model_version,
             status='pending',
         )
         db.add(event)
